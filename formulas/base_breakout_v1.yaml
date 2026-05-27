@@ -1,0 +1,64 @@
+# Stage-2 base breakout (Weinstein/IBD-style). Looks for tight consolidations
+# above SMA200 with dried-up volume — a coiled-spring setup that fires when
+# price breaks the base pivot on heavy volume. Geared toward asymmetric R:R
+# rather than ranking; the score is essentially binary (1.0 if all gates pass,
+# graded if some pass), so top-N becomes 'all qualifying names'.
+version: base_breakout_v1
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 50
+  sma_slow: 200                  # Stage-2 filter: pivot must sit above this
+  momentum_lookback: 60
+  breakout_lookback: 30          # "55-day high" proxy reused as base pivot
+
+  atr_period: 14
+  atr_contraction_lookback: 30
+  atr_contraction_threshold: 0.35
+  vol_short_lookback: 20
+  vol_long_lookback: 60
+  vol_dryup_threshold: 0.75      # tighter than pre_breakout_v1's 0.80
+  bb_period: 20
+  bb_squeeze_lookback: 60
+  bb_squeeze_percentile: 0.20
+
+# Weight the structural gates heavily; trend gives the Stage-2 confirmation.
+timeframe_score_weights:
+  momentum: 0.05
+  trend: 0.20
+  rsi: 0.00
+  breakout: 0.25                 # proximity to base pivot
+  volatility: 0.00
+  atr_contraction: 0.20
+  volume_dryup: 0.15
+  bb_squeeze: 0.15
+
+rsi_band: [45, 75]
+
+# Daily dominates — base breakout is a short-horizon setup.
+timeframe_weights:
+  daily: 0.75
+  weekly: 0.20
+  monthly: 0.05
+
+alignment_bonus: 0.10
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [20, 80]
+  sma_slow: [150, 300]
+  momentum_lookback: [20, 120]
+  breakout_lookback: [20, 60]
+  atr_period: [7, 28]
+  atr_contraction_lookback: [15, 60]
+  atr_contraction_threshold: [0.15, 0.50]
+  vol_short_lookback: [10, 40]
+  vol_long_lookback: [30, 120]
+  vol_dryup_threshold: [0.50, 0.90]
+  bb_period: [10, 30]
+  bb_squeeze_lookback: [30, 120]
+  bb_squeeze_percentile: [0.05, 0.35]
+  alignment_bonus: [0.0, 0.20]
+  rsi_band_low: [35, 55]
+  rsi_band_high: [65, 85]

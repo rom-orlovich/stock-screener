@@ -1,0 +1,29 @@
+# Backtest output
+runs/
+!runs/.gitkeep
+
+# Data caches
+_universe_cache/
+*.pkl
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.pytest_cache/
+.venv/
+venv/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Strategy backups (kept locally only, not pushed)
+formulas/*.bak_*.yaml

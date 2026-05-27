@@ -1,0 +1,41 @@
+# Momentum formula v1 — config, not code.
+# Claude tunes numbers within `bounds`; the engine never changes.
+version: momentum_v1
+
+# Per-timeframe indicator settings
+indicators:
+  rsi_period: 14
+  sma_fast: 20
+  sma_slow: 50
+  momentum_lookback: 90      # bars used for raw price momentum (% change)
+  breakout_lookback: 55      # high-of-N-bars breakout window
+
+# How each timeframe's sub-score is built (weights sum is normalized internally)
+timeframe_score_weights:
+  momentum: 0.40             # raw price momentum
+  trend: 0.30               # fast SMA above slow SMA, and price above both
+  rsi: 0.15                 # RSI in the healthy-momentum band
+  breakout: 0.15            # proximity to / break of N-bar high
+
+# RSI band considered "healthy momentum" (reward inside, penalize outside)
+rsi_band: [50, 70]
+
+# How the three timeframe scores combine into the final rank score
+timeframe_weights:
+  daily: 0.30
+  weekly: 0.40
+  monthly: 0.30
+
+# Bonus when all three timeframes agree on uptrend (trend alignment)
+alignment_bonus: 0.15
+
+# Allowed ranges Claude may tune inside (auto-tune stays here)
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [10, 30]
+  sma_slow: [40, 100]
+  momentum_lookback: [30, 180]
+  breakout_lookback: [20, 100]
+  alignment_bonus: [0.0, 0.30]
+  rsi_band_low: [40, 55]
+  rsi_band_high: [65, 80]

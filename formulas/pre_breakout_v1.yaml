@@ -1,0 +1,69 @@
+# Pre-breakout formula v1 — config, not code.
+# Hunts coiled-spring setups: volatility contraction, near multi-month highs,
+# volume drying up, Bollinger band-width squeeze. Designed to fire BEFORE the
+# breakout, not chase it. Strongly daily-weighted because the squeeze signature
+# resolves on a short horizon.
+version: pre_breakout_v1
+direction: long
+
+indicators:
+  # Reused by the shared trend / rsi / breakout sub-scores.
+  rsi_period: 14
+  sma_fast: 20
+  sma_slow: 50
+  momentum_lookback: 60
+  breakout_lookback: 55          # proximity to 55-day high (criterion #2)
+
+  # Pre-breakout specific knobs (read by engine/score.py via cfg.get).
+  atr_period: 14
+  atr_contraction_lookback: 20   # criterion #1: atr_pct over last N sessions
+  atr_contraction_threshold: 0.30  # need >=30% drop -> sub-score 1.0
+  vol_short_lookback: 20         # criterion #3: 20d avg vol
+  vol_long_lookback: 60          #               vs 60d avg vol
+  vol_dryup_threshold: 0.80      # 20d < 80% of 60d -> sub-score 1.0
+  bb_period: 20
+  bb_squeeze_lookback: 60        # criterion #4: trailing window for percentile
+  bb_squeeze_percentile: 0.20    # bottom 20% -> sub-score 1.0
+
+# Four criteria are equal-weighted; trend gets a small confirmation weight so
+# we don't pick coiled-spring downtrends. Momentum/rsi/volatility off.
+timeframe_score_weights:
+  momentum: 0.00
+  trend: 0.10
+  rsi: 0.00
+  breakout: 0.20                 # proximity to 55-day high
+  volatility: 0.00
+  atr_contraction: 0.25          # vol contraction
+  volume_dryup: 0.20             # volume dry-up
+  bb_squeeze: 0.25               # band squeeze
+
+# Filter band still used by the rsi sub-score if anyone re-enables it.
+rsi_band: [40, 70]
+
+# Pre-breakout is a short-horizon setup; daily dominates.
+timeframe_weights:
+  daily: 0.70
+  weekly: 0.20
+  monthly: 0.10
+
+# Small alignment bonus for healthy backdrop across timeframes.
+alignment_bonus: 0.05
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [10, 30]
+  sma_slow: [40, 100]
+  momentum_lookback: [20, 120]
+  breakout_lookback: [20, 100]
+  atr_period: [7, 28]
+  atr_contraction_lookback: [10, 60]
+  atr_contraction_threshold: [0.10, 0.50]
+  vol_short_lookback: [10, 40]
+  vol_long_lookback: [30, 120]
+  vol_dryup_threshold: [0.50, 0.95]
+  bb_period: [10, 30]
+  bb_squeeze_lookback: [30, 120]
+  bb_squeeze_percentile: [0.05, 0.40]
+  alignment_bonus: [0.0, 0.20]
+  rsi_band_low: [30, 50]
+  rsi_band_high: [60, 80]

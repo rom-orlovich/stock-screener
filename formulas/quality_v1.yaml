@@ -1,0 +1,48 @@
+# Quality / low-volatility formula v1 — config, not code.
+# Scores low-volatility stocks: lowest 90-day stdev of daily returns gets the
+# highest `volatility` sub-score (computed by engine/indicators.stdev_returns
+# and squashed in engine/score.timeframe_score).
+#
+# We *do not* want a directional reversion bias, so direction stays 'long'.
+# Trend and rsi still get some weight so the screener prefers stable
+# uptrends over bleeding low-vol names.
+version: quality_v1
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 20
+  sma_slow: 50
+  momentum_lookback: 90
+  breakout_lookback: 55
+  volatility_lookback: 90      # rolling stdev window for the volatility score
+
+# Volatility-dominated weighting. Momentum is de-emphasized; trend confirms
+# the name is still healthy. RSI band reused as a "not stretched" filter.
+timeframe_score_weights:
+  momentum: 0.10
+  trend: 0.20
+  rsi: 0.10
+  breakout: 0.00               # disable breakout — quality screens ignore it
+  volatility: 0.60             # dominant component: low vol -> high score
+
+# Same band as momentum: healthy positive RSI without being euphoric.
+rsi_band: [45, 65]
+
+timeframe_weights:
+  daily: 0.20
+  weekly: 0.40
+  monthly: 0.40                # longer horizon matches low-vol persistence
+
+alignment_bonus: 0.05
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [10, 30]
+  sma_slow: [40, 100]
+  momentum_lookback: [30, 180]
+  breakout_lookback: [20, 100]
+  volatility_lookback: [30, 180]
+  alignment_bonus: [0.0, 0.15]
+  rsi_band_low: [40, 55]
+  rsi_band_high: [60, 75]

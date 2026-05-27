@@ -1,0 +1,45 @@
+# Mean-reversion formula v1 — config, not code.
+# Hunts oversold names: low recent momentum, fast SMA below slow SMA,
+# price near a rolling low, RSI in the oversold band [20, 40].
+# The engine flips momentum + trend sub-scores via `direction: reversion`,
+# and reuses `breakout` semantics against `rolling_low` instead of `rolling_high`.
+version: mean_reversion_v1
+direction: reversion
+
+# Per-timeframe indicator settings
+indicators:
+  rsi_period: 14
+  sma_fast: 20
+  sma_slow: 50
+  momentum_lookback: 60        # shorter lookback — we want recent weakness
+  breakout_lookback: 20        # proximity to 20-bar low (breakdown)
+
+# How each timeframe's sub-score is built. Same keys as momentum_v1 so the
+# engine reuses the same code path; weights sum is normalized internally.
+timeframe_score_weights:
+  momentum: 0.40               # inverted: lower raw momentum -> higher score
+  trend: 0.20                  # inverted: downtrend -> higher score
+  rsi: 0.25                    # rsi inside the oversold band
+  breakout: 0.15               # proximity to rolling_low (breakdown)
+
+# RSI band considered "oversold" — reward inside, decay outside.
+rsi_band: [20, 40]
+
+# How the three timeframe scores combine into the final rank score
+timeframe_weights:
+  daily: 0.40                  # mean-reversion is a shorter-horizon edge
+  weekly: 0.40
+  monthly: 0.20
+
+# Bonus when all three timeframes are weak (downtrend across the board).
+alignment_bonus: 0.10
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [10, 30]
+  sma_slow: [40, 100]
+  momentum_lookback: [20, 120]
+  breakout_lookback: [10, 60]
+  alignment_bonus: [0.0, 0.25]
+  rsi_band_low: [10, 30]
+  rsi_band_high: [35, 50]
