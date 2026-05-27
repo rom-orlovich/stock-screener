@@ -2,6 +2,9 @@
 runs/
 !runs/.gitkeep
 
+# Dashboard data (regenerated; keep index.html only)
+docs/data.json
+
 # Data caches
 _universe_cache/
 *.pkl

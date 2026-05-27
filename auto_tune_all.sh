@@ -16,4 +16,7 @@ for f in formulas/*.yaml; do
   python auto_tune.py --formula "$f" --start 2023-01-01 --end 2026-05-26 --universe sp500 --trials 3 >> "$LOG" 2>&1 || echo "FAILED on $f" >> "$LOG"
 done
 echo "" >> "$LOG"
+echo "--- regenerating dashboard ---" >> "$LOG"
+python dashboard.py >> "$LOG" 2>&1 || echo "dashboard FAILED" >> "$LOG"
+echo "" >> "$LOG"
 echo "=== done @ $(date -Iseconds) ===" >> "$LOG"
