@@ -528,6 +528,11 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
         picks_by_date = _picks_by_date(latest_trades)
         ticker_journeys = _ticker_journeys(latest_trades)
 
+        latest_equity_fp = RUNS / f"bt_equity_{latest_base}.csv"
+        latest_bench_fp = RUNS / f"bt_benchmark_{latest_base}.csv"
+        equity_curve = _read_equity(latest_equity_fp) if latest_equity_fp.exists() else []
+        benchmark_curve = _read_equity(latest_bench_fp) if latest_bench_fp.exists() else []
+
         # timeline of backtest runs (oldest → newest for chart left-to-right)
         timeline = []
         for fp_summary, summary in sorted(items, key=lambda x: _stamp_from_name(x[0].name)):
@@ -578,6 +583,9 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
             "picks_by_date": picks_by_date,
             "picks_source": latest_trades_fp.name if latest_trades_fp.exists() else None,
             "ticker_journeys": ticker_journeys,
+            "equity_curve": equity_curve,
+            "benchmark_curve": benchmark_curve,
+            "equity_source": latest_equity_fp.name if latest_equity_fp.exists() else None,
             "scan_rows": scan_rows,
             "scan_source": scan_fp.name if scan_fp else None,
             "scan_stamp": scan_stamp,
@@ -1330,6 +1338,7 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
         <h2 class="text-lg font-semibold">Performance timeline</h2>
         <span class="text-xs text-slate-500">Each point = one backtest run. Hover the chart for the run timestamp.</span>
       </div>
+      <p class="text-xs text-slate-500 mt-1">The timeline above plots one dot per historical RUN — it stays empty until the nightly auto-tune accumulates multiple runs. The equity curve below is from the LATEST run only and always populates, even for brand-new strategies.</p>
       <div class="chart-box mt-3"><canvas id="timeline-chart"></canvas></div>
       <div class="overflow-x-auto mt-3">
         <table class="w-full text-sm compact num">
@@ -1344,6 +1353,20 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
           <tbody id="timeline-rows"></tbody>
         </table>
       </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Equity curve — latest backtest run</h2>
+          <p class="text-xs text-slate-500 mt-1">Each point is the portfolio value if you'd held this strategy's top-20 every week since 2023, starting from $1. Compared against buy-and-hold SPY over the same window.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div>source <span id="equity-source">—</span></div>
+          <div><span id="equity-points">0</span> weekly points</div>
+        </div>
+      </div>
+      <div class="chart-box mt-3" style="height: 360px; max-height: 360px;"><canvas id="equity-chart"></canvas></div>
     </div>
 
     <div class="card p-5">
@@ -1535,6 +1558,7 @@ async function load() {
   renderTradingRules(data);
   renderRiskMetrics(data);
   renderTimeline(data);
+  renderEquityCurve(data);
   renderScan(data);
   renderTickerJourney(data);
   renderPicks(data);
@@ -1892,6 +1916,50 @@ function renderTimeline(data) {
         x: { ticks: { color: '#64748b', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' }},
         y:  { position: 'left',  ticks: { color: '#60a5fa' }, grid: { color: 'rgba(255,255,255,0.04)' }, title: { text: 'Sharpe', display: true, color: '#60a5fa' }},
         y1: { position: 'right', ticks: { color: '#5fe6a2', callback: v => (v*100).toFixed(0)+'%' }, grid: { drawOnChartArea: false }, title: { text: 'Return / |DD|', display: true, color: '#5fe6a2' }},
+      }
+    }
+  });
+}
+
+function renderEquityCurve(data) {
+  const eq = data.equity_curve || [];
+  const bench = data.benchmark_curve || [];
+  document.getElementById('equity-source').textContent = data.equity_source || '—';
+  document.getElementById('equity-points').textContent = eq.length;
+
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  if (!eq.length) {
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px ui-sans-serif, system-ui';
+    ctx.fillText('No equity curve available for this strategy yet.', 12, 24);
+    return;
+  }
+
+  const benchByDate = new Map(bench.map(p => [p.date, p.value]));
+  const labels = eq.map(p => p.date);
+  const stratData = eq.map(p => p.value);
+  const benchData = eq.map(p => benchByDate.has(p.date) ? benchByDate.get(p.date) : null);
+
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Strategy', data: stratData, borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.08)', tension: 0.15, borderWidth: 2, pointRadius: 0, fill: false },
+        { label: 'SPY (benchmark)', data: benchData, borderColor: '#94a3b8', borderDash: [5,4], tension: 0.15, borderWidth: 1.5, pointRadius: 0, fill: false },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8' }},
+        title: { display: true, text: 'Strategy vs SPY — daily compounded equity (base = $1)', color: '#cbd5e1', font: { size: 13, weight: 'normal' }},
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: $${Number(c.parsed.y).toFixed(3)}` }},
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.04)' }},
+        y: { ticks: { color: '#94a3b8', callback: v => '$' + Number(v).toFixed(2) }, grid: { color: 'rgba(255,255,255,0.04)' }},
       }
     }
   });
