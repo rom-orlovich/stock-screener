@@ -14,13 +14,14 @@ Exit logic (priority order, evaluated on each daily close inside the period):
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from . import atr as atr_mod
-from .score import Formula, score_ticker
+from .score import Formula, precompute_indicators, score_ticker, score_ticker_at
 
 
 @dataclass
@@ -200,6 +201,19 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
     abs_mom = f.raw.get("absolute_momentum") or {}
     cash_fallback = abs_mom.get("cash_fallback") if abs_mom else None
 
+    # Vectorized scoring path — opt-in via env flag. Parity is only proven for
+    # W-FRI rebalances (weekly resample bucket containing d0=Friday matches
+    # the per-d0 partial resample because Sat/Sun have no trading).
+    use_vec = (os.environ.get("USE_VECTORIZED_SCORING", "0") == "1"
+               and cfg.rebalance.endswith("FRI"))
+    precomputed: dict[str, dict | None] = {}
+    if use_vec:
+        for tkr, df in price_data.items():
+            try:
+                precomputed[tkr] = precompute_indicators(df, f)
+            except Exception:  # noqa: BLE001
+                precomputed[tkr] = None
+
     equity = [1.0]
     eq_index = [dates[0]]
     trades = []
@@ -226,7 +240,11 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
             if len(hist) < 60:
                 continue
             try:
-                sc = score_ticker(hist, f)["score"]
+                pre = precomputed.get(tkr) if use_vec else None
+                if pre is not None:
+                    sc = score_ticker_at(pre, d0, f)["score"]
+                else:
+                    sc = score_ticker(hist, f)["score"]
             except Exception:  # noqa: BLE001
                 continue
             if sc >= cfg.min_score:

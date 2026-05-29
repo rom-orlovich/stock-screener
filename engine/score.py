@@ -68,7 +68,20 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
     low = df["low"] if "low" in df else close
     direction = f.direction
 
-    if len(close.dropna()) < cfg["sma_slow"] + 1:
+    # Cap indicator windows to what the timeframe can actually supply. With
+    # ~3y of monthly bars there are only ~41 samples, so YAML sma_slow=50/200
+    # would otherwise trip the guard and zero out the entire monthly score.
+    # Daily/weekly with thousands of bars are unaffected (min() returns the
+    # YAML value).
+    n_avail = int(close.dropna().shape[0])
+    local_sma_slow = min(cfg["sma_slow"], max(20, n_avail // 3))
+    # n_avail//6 is the floor so daily/weekly (thousands of bars) keep
+    # cfg["sma_fast"] exactly — strict parity on the well-supplied path.
+    local_sma_fast = min(cfg["sma_fast"], max(5, n_avail // 6))
+    local_mom_lb = min(cfg["momentum_lookback"], max(3, n_avail // 4))
+    local_breakout_lb = min(cfg["breakout_lookback"], max(10, n_avail // 4))
+
+    if n_avail < local_sma_slow + 1:
         return {"momentum": 0.0, "trend": 0.0, "rsi": 0.0,
                 "breakout": 0.0, "volatility": 0.0,
                 "atr_contraction": 0.0, "volume_dryup": 0.0,
@@ -76,9 +89,9 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
                 "total": 0.0, "uptrend": False}
 
     rsi_v = ind.rsi(close, cfg["rsi_period"]).iloc[-1]
-    sf = ind.sma(close, cfg["sma_fast"]).iloc[-1]
-    ss = ind.sma(close, cfg["sma_slow"]).iloc[-1]
-    mom_lb = cfg["momentum_lookback"]
+    sf = ind.sma(close, local_sma_fast).iloc[-1]
+    ss = ind.sma(close, local_sma_slow).iloc[-1]
+    mom_lb = local_mom_lb
     mom_skip = int(cfg.get("momentum_skip_recent", 0) or 0)
     if mom_skip > 0 and len(close) > mom_lb + mom_skip:
         end_val = float(close.iloc[-1 - mom_skip])
@@ -86,8 +99,8 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
         mom = (end_val / start_val - 1) * 100 if start_val > 0 else float("nan")
     else:
         mom = ind.momentum(close, mom_lb).iloc[-1]
-    hi = ind.rolling_high(high, cfg["breakout_lookback"]).iloc[-1]
-    lo_n = ind.rolling_low(low, cfg["breakout_lookback"]).iloc[-1]
+    hi = ind.rolling_high(high, local_breakout_lb).iloc[-1]
+    lo_n = ind.rolling_low(low, local_breakout_lb).iloc[-1]
     px = close.iloc[-1]
 
     # raw momentum -> 0-1 (≈ +50% -> ~1.0). Reversion inverts it.
@@ -224,6 +237,293 @@ def score_ticker(daily: pd.DataFrame, f: Formula) -> dict:
 
     # Alignment: long -> all uptrend; reversion -> none uptrend (i.e. consistent
     # downtrend / weak across timeframes).
+    if f.direction == "reversion":
+        aligned = not any(sub[tf]["uptrend"] for tf in ("daily", "weekly", "monthly"))
+    else:
+        aligned = all(sub[tf]["uptrend"] for tf in ("daily", "weekly", "monthly"))
+    bonus = f.raw.get("alignment_bonus", 0.0) if aligned else 0.0
+    final = round(_clip01(base + bonus), 4)
+
+    return {"score": final, "aligned": aligned,
+            "base": round(base, 4), "bonus": bonus, "timeframes": sub}
+
+
+# ---------------------------------------------------------------------------
+# Vectorized scoring path (precompute indicators once per ticker, reuse per d0).
+# Gated by USE_VECTORIZED_SCORING in engine/backtest.py — default OFF.
+#
+# Parity guarantees (vs the per-d0 path above):
+#   * Daily indicators are causal — value at position pos on full series equals
+#     value at position -1 on the prior slice.
+#   * Weekly indicators: SAFE only when the rebalance date d0 is a Friday
+#     (W-FRI rebalance). The W (anchor=Sunday) bucket containing d0=Friday
+#     holds Mon-Fri data only because there is no Sat/Sun trading; the same
+#     bucket is what `resample_ohlcv(daily.loc[:Friday], 'W')` produces.
+#     For any non-Friday d0 this would leak future bars.
+#   * Monthly is NOT precomputed — the full-month bucket leaks future bars
+#     when d0 falls inside the month. Monthly is rebuilt per d0 from
+#     `daily_raw.loc[:d0]`, identical to the per-d0 path.
+# ---------------------------------------------------------------------------
+
+
+def _pos_at_daily(index: pd.DatetimeIndex, d0: pd.Timestamp) -> int:
+    """Position of last bar at or before d0 in a daily index. -1 if none."""
+    return int(index.searchsorted(d0, side="right")) - 1
+
+
+def _pos_at_weekly(index: pd.DatetimeIndex, d0: pd.Timestamp) -> int:
+    """Position of bucket containing d0 in a weekly W-anchor=SUN index.
+
+    For d0 = Friday, the matching bucket label is the following Sunday; for
+    d0 = Sunday the label equals d0 itself. Returns len(index) when d0 is past
+    the last bucket label.
+    """
+    return int(index.searchsorted(d0, side="left"))
+
+
+def precompute_indicators(daily: pd.DataFrame, f: Formula) -> dict:
+    """Pre-compute every indicator the scorer needs on the FULL series.
+
+    Returns a dict keyed by timeframe ('daily', 'weekly') plus '_daily_raw'
+    (used by the monthly per-d0 path inside `score_ticker_at`).
+    """
+    cfg = f.raw["indicators"]
+
+    def _compute(df: pd.DataFrame) -> dict:
+        close = df["close"]
+        high = df["high"] if "high" in df.columns else close
+        low = df["low"] if "low" in df.columns else close
+        out: dict = {
+            "df": df,
+            "close": close,
+            "high": high,
+            "low": low,
+            "rsi": ind.rsi(close, cfg["rsi_period"]),
+            "sma_fast": ind.sma(close, cfg["sma_fast"]),
+            "sma_slow": ind.sma(close, cfg["sma_slow"]),
+            "momentum": ind.momentum(close, cfg["momentum_lookback"]),
+            "rolling_high": ind.rolling_high(high, cfg["breakout_lookback"]),
+            "rolling_low": ind.rolling_low(low, cfg["breakout_lookback"]),
+            "stdev_returns": ind.stdev_returns(close, cfg.get("volatility_lookback", 90)),
+        }
+        if {"open", "high", "low", "close"}.issubset(df.columns):
+            try:
+                out["atr_pct"] = atr_mod.atr_pct(df, cfg.get("atr_period", 14))
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                out["bb_width"] = atr_mod.bollinger_band_width(close, cfg.get("bb_period", 20))
+            except Exception:  # noqa: BLE001
+                pass
+            if "volume" in df.columns:
+                try:
+                    out["avg_vol_short"] = atr_mod.avg_volume(df, cfg.get("vol_short_lookback", 20))
+                    out["avg_vol_long"] = atr_mod.avg_volume(df, cfg.get("vol_long_lookback", 60))
+                except Exception:  # noqa: BLE001
+                    pass
+        return out
+
+    weekly = ind.resample_ohlcv(daily, "W")
+    return {
+        "daily": _compute(daily),
+        "weekly": _compute(weekly),
+        "_daily_raw": daily,
+    }
+
+
+_EMPTY_TF = {
+    "momentum": 0.0, "trend": 0.0, "rsi": 0.0,
+    "breakout": 0.0, "volatility": 0.0,
+    "atr_contraction": 0.0, "volume_dryup": 0.0,
+    "bb_squeeze": 0.0,
+    "total": 0.0, "uptrend": False,
+}
+
+
+def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
+    """Mirror of `timeframe_score` reading from precomputed series at position `pos`.
+
+    `pos` is the integer position in the precomputed series that corresponds
+    to the evaluation timestamp d0 — see `_pos_at_daily` / `_pos_at_weekly`.
+    """
+    cfg = f.raw["indicators"]
+    close = pre["close"]
+    high = pre["high"]
+    low = pre["low"]
+    df = pre["df"]
+    direction = f.direction
+
+    if pos < 0 or pos >= len(close):
+        return dict(_EMPTY_TF)
+
+    # Mirror the adaptive caps from `timeframe_score`. Caps depend on n_avail
+    # at d0, so when any cap is active for this position the precomputed
+    # series (built with the full YAML period) cannot be reused — fall back
+    # to per-d0 evaluation on the slice for bit-exact parity.
+    n_avail = int(close.iloc[: pos + 1].notna().sum())
+    local_sma_slow = min(cfg["sma_slow"], max(20, n_avail // 3))
+    local_sma_fast = min(cfg["sma_fast"], max(5, n_avail // 6))
+    local_mom_lb = min(cfg["momentum_lookback"], max(3, n_avail // 4))
+    local_breakout_lb = min(cfg["breakout_lookback"], max(10, n_avail // 4))
+
+    caps_active = (local_sma_slow != cfg["sma_slow"]
+                   or local_sma_fast != cfg["sma_fast"]
+                   or local_mom_lb != cfg["momentum_lookback"]
+                   or local_breakout_lb != cfg["breakout_lookback"])
+    if caps_active:
+        # `pre["df"].iloc[:pos+1]` matches the slice the per-d0 path would see:
+        #   daily:  df.loc[:d0]               (causal, no Sat/Sun in df anyway)
+        #   weekly: resample(daily.loc[:d0])  (same bucket set for d0=Friday)
+        return timeframe_score(df.iloc[: pos + 1], f)
+
+    if n_avail < local_sma_slow + 1:
+        return dict(_EMPTY_TF)
+
+    rsi_v = pre["rsi"].iloc[pos]
+    sf = pre["sma_fast"].iloc[pos]
+    ss = pre["sma_slow"].iloc[pos]
+
+    mom_lb = cfg["momentum_lookback"]
+    mom_skip = int(cfg.get("momentum_skip_recent", 0) or 0)
+    n_close_total = pos + 1  # equals len(close.loc[:d0]) in old path
+    if mom_skip > 0 and n_close_total > mom_lb + mom_skip:
+        end_val = float(close.iloc[pos - mom_skip])
+        start_val = float(close.iloc[pos - mom_skip - mom_lb])
+        mom = (end_val / start_val - 1) * 100 if start_val > 0 else float("nan")
+    else:
+        mom = pre["momentum"].iloc[pos]
+
+    hi = pre["rolling_high"].iloc[pos]
+    lo_n = pre["rolling_low"].iloc[pos]
+    px = close.iloc[pos]
+
+    mom_s = _clip01((mom + 10) / 60.0) if pd.notna(mom) else 0.0
+
+    uptrend = pd.notna(sf) and pd.notna(ss) and sf > ss and px > sf and px > ss
+    trend_s = 1.0 if uptrend else (0.5 if pd.notna(sf) and px > sf else 0.0)
+
+    if direction == "reversion":
+        mom_s = 1.0 - mom_s
+        trend_s = 1.0 - trend_s
+
+    lo, hicut = f.raw["rsi_band"]
+    if pd.isna(rsi_v):
+        rsi_s = 0.0
+    elif lo <= rsi_v <= hicut:
+        rsi_s = 1.0
+    elif rsi_v < lo:
+        rsi_s = _clip01(rsi_v / lo)
+    else:
+        rsi_s = _clip01((100 - rsi_v) / (100 - hicut))
+
+    if direction == "reversion":
+        if pd.notna(lo_n) and lo_n > 0:
+            brk_s = _clip01(lo_n / px) if px >= lo_n else 1.0
+        else:
+            brk_s = 0.0
+    else:
+        if pd.notna(hi) and hi > 0:
+            brk_s = _clip01(px / hi - 0.0) if px >= hi else _clip01(1 - (hi - px) / hi * 5)
+        else:
+            brk_s = 0.0
+
+    vol = pre["stdev_returns"].iloc[pos]
+    if pd.notna(vol):
+        vol_s = _clip01((0.05 - vol) / 0.04)
+    else:
+        vol_s = 0.0
+
+    atr_s = vdry_s = bbsq_s = 0.0
+    if {"open", "high", "low", "close"}.issubset(df.columns):
+        ap_lookback = cfg.get("atr_contraction_lookback", 20)
+        ap_thresh = cfg.get("atr_contraction_threshold", 0.30)
+        ap = pre.get("atr_pct")
+        try:
+            # Old path: `len(ap) > ap_lookback` on ap computed from slice of length pos+1.
+            if ap is not None and (pos + 1) > ap_lookback:
+                cur_v = ap.iloc[pos]
+                prev_v = ap.iloc[pos - ap_lookback]
+                if pd.notna(cur_v) and pd.notna(prev_v):
+                    prev = float(prev_v)
+                    cur = float(cur_v)
+                    if prev > 0:
+                        ratio = cur / prev
+                        atr_s = _clip01((1.0 - ratio) / max(ap_thresh, 1e-6))
+        except Exception:  # noqa: BLE001
+            atr_s = 0.0
+
+        v_thresh = cfg.get("vol_dryup_threshold", 0.80)
+        if "volume" in df.columns:
+            try:
+                short_av_s = pre.get("avg_vol_short")
+                long_av_s = pre.get("avg_vol_long")
+                if short_av_s is not None and long_av_s is not None:
+                    short_av = short_av_s.iloc[pos]
+                    long_av = long_av_s.iloc[pos]
+                    if pd.notna(short_av) and pd.notna(long_av) and long_av > 0:
+                        ratio = float(short_av) / float(long_av)
+                        vdry_s = _clip01((1.0 - ratio) / max(1.0 - v_thresh, 1e-6))
+            except Exception:  # noqa: BLE001
+                vdry_s = 0.0
+
+        bb_lookback = cfg.get("bb_squeeze_lookback", 60)
+        bb_pct = cfg.get("bb_squeeze_percentile", 0.20)
+        try:
+            bbw = pre.get("bb_width")
+            if bbw is not None:
+                # Old: bbw computed on close.loc[:d0] then dropna().iloc[-bb_lookback:]
+                bbw_slice = bbw.iloc[: pos + 1].dropna()
+                window = bbw_slice.iloc[-bb_lookback:]
+                if len(window) >= max(10, bb_lookback // 2):
+                    cur_w = float(window.iloc[-1])
+                    rank_v = float((window <= cur_w).sum() - 1) / max(len(window) - 1, 1)
+                    if rank_v <= bb_pct:
+                        bbsq_s = 1.0
+                    else:
+                        bbsq_s = _clip01((1.0 - rank_v) / max(1.0 - bb_pct, 1e-6))
+        except Exception:  # noqa: BLE001
+            bbsq_s = 0.0
+
+    w = _norm(f.raw["timeframe_score_weights"])
+    total = (w.get("momentum", 0.0) * mom_s
+             + w.get("trend", 0.0) * trend_s
+             + w.get("rsi", 0.0) * rsi_s
+             + w.get("breakout", 0.0) * brk_s
+             + w.get("volatility", 0.0) * vol_s
+             + w.get("atr_contraction", 0.0) * atr_s
+             + w.get("volume_dryup", 0.0) * vdry_s
+             + w.get("bb_squeeze", 0.0) * bbsq_s)
+    return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
+            "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
+            "volatility": round(vol_s, 4),
+            "atr_contraction": round(atr_s, 4),
+            "volume_dryup": round(vdry_s, 4),
+            "bb_squeeze": round(bbsq_s, 4),
+            "total": round(total, 4), "uptrend": bool(uptrend)}
+
+
+def score_ticker_at(precomputed: dict, d0: pd.Timestamp, f: Formula) -> dict:
+    """Vectorized counterpart to `score_ticker`. Same return shape & math.
+
+    Monthly is recomputed per d0 from the raw daily series — using a full-month
+    resample would leak future bars when d0 falls inside a month.
+    """
+    daily_pre = precomputed["daily"]
+    weekly_pre = precomputed["weekly"]
+    daily_raw = precomputed["_daily_raw"]
+
+    d_pos = _pos_at_daily(daily_pre["close"].index, d0)
+    w_pos = _pos_at_weekly(weekly_pre["close"].index, d0)
+
+    daily_sub = _timeframe_score_at(daily_pre, d_pos, f)
+    weekly_sub = _timeframe_score_at(weekly_pre, w_pos, f)
+    monthly_slice = ind.resample_ohlcv(daily_raw.loc[:d0], "ME")
+    monthly_sub = timeframe_score(monthly_slice, f)
+
+    sub = {"daily": daily_sub, "weekly": weekly_sub, "monthly": monthly_sub}
+    tw = _norm(f.raw["timeframe_weights"])
+    base = sum(tw[tf] * sub[tf]["total"] for tf in tw)
+
     if f.direction == "reversion":
         aligned = not any(sub[tf]["uptrend"] for tf in ("daily", "weekly", "monthly"))
     else:
