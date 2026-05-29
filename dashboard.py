@@ -28,6 +28,8 @@ from pathlib import Path
 import pandas as pd
 import yaml
 
+from analyze_strategies import trade_stats
+
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 DOCS = ROOT / "docs"
@@ -371,6 +373,132 @@ def _picks_by_date(trades: list[dict]) -> list[dict]:
     return out
 
 
+def _ticker_journeys(trades: list[dict], top_n: int = 20, min_appearances: int = 3) -> dict[str, list[dict]]:
+    """Group trades by ticker → ordered list of weekly appearances. For each
+    rebalance day, rank is the ticker's position among that day's picks
+    sorted by score desc (1 = highest scorer that week). Only tickers that
+    appeared in the top-N at least `min_appearances` times are kept, so the
+    payload stays small and the dropdown stays useful."""
+    # First pass: bucket trades by enter date, compute ranks within each day.
+    by_day: dict[str, list[dict]] = defaultdict(list)
+    for t in trades:
+        d = (t.get("enter") or "")[:10]
+        if not d:
+            continue
+        try:
+            sc = float(t.get("score") or 0)
+        except ValueError:
+            sc = 0.0
+        try:
+            ret = float(t.get("ret") or 0)
+        except ValueError:
+            ret = 0.0
+        by_day[d].append({
+            "date": d,
+            "ticker": t.get("ticker", ""),
+            "score": sc,
+            "ret": ret,
+            "exit": t.get("exit", ""),
+            "exit_date": (t.get("exit_date") or "")[:10],
+        })
+
+    # Second pass: assign rank per day and bucket by ticker.
+    by_ticker: dict[str, list[dict]] = defaultdict(list)
+    top_n_counts: dict[str, int] = defaultdict(int)
+    for d, picks in by_day.items():
+        picks.sort(key=lambda r: r["score"], reverse=True)
+        for i, p in enumerate(picks):
+            rank = i + 1
+            entry = {
+                "date": p["date"],
+                "rank": rank,
+                "score": round(p["score"], 4),
+                "ret": round(p["ret"], 4),
+                "exit": p["exit"],
+                "exit_date": p["exit_date"],
+            }
+            by_ticker[p["ticker"]].append(entry)
+            if rank <= top_n:
+                top_n_counts[p["ticker"]] += 1
+
+    # Filter: only keep tickers that hit the top-N at least N times.
+    out: dict[str, list[dict]] = {}
+    for tk, journey in by_ticker.items():
+        if top_n_counts.get(tk, 0) >= min_appearances:
+            journey.sort(key=lambda r: r["date"])
+            out[tk] = journey
+    return out
+
+
+def _trading_rules(cfg: dict) -> dict:
+    """Human-readable description of how the strategy actually trades, derived
+    from BacktestConfig fields. A 0 value disables that exit (consistent with
+    engine/backtest.py)."""
+    def _pct(v):
+        try:
+            return float(v) * 100
+        except (TypeError, ValueError):
+            return 0.0
+
+    atr_mult = cfg.get("atr_stop_mult") or 0
+    atr_period = cfg.get("atr_stop_period") or 14
+    trail_pct = _pct(cfg.get("trailing_stop_pct"))
+    trail_arm = _pct(cfg.get("trailing_activate_pct"))
+    time_bars = int(cfg.get("time_stop_bars") or 0)
+    tp_pct = _pct(cfg.get("take_profit_pct"))
+    sl_pct = _pct(cfg.get("stop_loss_pct"))
+    top_n = cfg.get("top_n", 20)
+    rebal = cfg.get("rebalance", "W-FRI")
+
+    rebal_label = {
+        "W-FRI": "every Friday's close (weekly)",
+        "ME": "month-end close (monthly)",
+        "M": "month-end close (monthly)",
+    }.get(rebal, f"on {rebal}")
+
+    return {
+        "entry_signal": f"Top {top_n} by score, ranked at {rebal_label}",
+        "holding_period": (
+            f"Held until the next rebalance ({rebal}) — earlier exit if a "
+            f"stop, trailing stop, take-profit, or time-stop triggers"
+        ),
+        "stops": {
+            "atr_stop": (
+                f"{atr_mult:g}× ATR({atr_period}) below entry"
+                if atr_mult > 0 else "disabled"
+            ),
+            "hard_stop_loss": (
+                f"{sl_pct:g}% below entry" if sl_pct > 0 else "disabled"
+            ),
+            "trailing_stop": (
+                f"{trail_pct:g}% below running peak, arms after +{trail_arm:g}% gain"
+                if trail_pct > 0 else "disabled"
+            ),
+            "time_stop": (
+                f"close after {time_bars} daily bars" if time_bars > 0 else "disabled"
+            ),
+            "take_profit": (
+                f"{tp_pct:g}% above entry" if tp_pct > 0 else "disabled"
+            ),
+        },
+        "cost_per_rebalance_bps": cfg.get("cost_bps", 0),
+        "benchmark": cfg.get("benchmark_ticker", "SPY"),
+    }
+
+
+def _risk_metrics(trades_fp: Path) -> dict:
+    """Re-use analyze_strategies.trade_stats() on the latest run's trades."""
+    if not trades_fp.exists():
+        return {}
+    try:
+        df = pd.read_csv(trades_fp)
+        if "ret" in df.columns:
+            df["ret"] = pd.to_numeric(df["ret"], errors="coerce")
+        return trade_stats(df)
+    except Exception:
+        return {}
+
+
 def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
     """For every formula seen in bt_summaries, build a full history payload."""
     # auto_tune trials keyed by formula filename (e.g. "momentum_v1.yaml")
@@ -398,6 +526,7 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
         latest_trades_fp = RUNS / f"bt_trades_{latest_base}.csv"
         latest_trades = _read_trades(latest_trades_fp) if latest_trades_fp.exists() else []
         picks_by_date = _picks_by_date(latest_trades)
+        ticker_journeys = _ticker_journeys(latest_trades)
 
         # timeline of backtest runs (oldest → newest for chart left-to-right)
         timeline = []
@@ -432,8 +561,14 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
         scan_fp, scan_stamp = _latest_scan_for(basename)
         scan_rows = _scan_rows(scan_fp) if scan_fp else []
 
+        latest_cfg = (items[0][1].get("config") or {})
+        trading_rules = _trading_rules(latest_cfg)
+        risk_metrics = _risk_metrics(latest_trades_fp)
+
         out[basename] = {
             "formula": basename,
+            "trading_rules": trading_rules,
+            "risk_metrics": risk_metrics,
             "timeline": timeline,
             "change_log": change_log,
             "monthly_baseline": monthly_baseline,
@@ -442,6 +577,7 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
             "param_diffs": diffs,
             "picks_by_date": picks_by_date,
             "picks_source": latest_trades_fp.name if latest_trades_fp.exists() else None,
+            "ticker_journeys": ticker_journeys,
             "scan_rows": scan_rows,
             "scan_source": scan_fp.name if scan_fp else None,
             "scan_stamp": scan_stamp,
@@ -1151,6 +1287,44 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
 
     <div class="card p-5">
       <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Ticker journey through time</h2>
+          <p class="text-xs text-slate-500 mt-1">Pick any ticker that appeared in the top-N at least 3× to see when it entered, what rank, what score, and what return it delivered week by week.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div><span id="journey-count">0</span> tickers eligible</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mt-3 flex-wrap text-sm">
+        <input id="journey-filter" type="text" placeholder="search ticker (e.g. NVDA)" class="bg-[#0b0f1a] border border-white/10 px-3 py-1.5 rounded w-56" />
+        <select id="journey-select" class="bg-[#0b0f1a] border border-white/10 text-sm px-2 py-1 rounded min-w-[16rem]"></select>
+        <span class="text-xs text-slate-500" id="journey-meta">—</span>
+      </div>
+      <div class="grid-2 mt-4" style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div>
+          <div class="text-xs text-slate-400 mb-1">Score timeline (green = winning week, red = losing week)</div>
+          <div class="chart-box"><canvas id="journey-chart"></canvas></div>
+        </div>
+        <div class="overflow-x-auto scroll-box">
+          <table class="w-full text-sm compact num">
+            <thead class="text-slate-400 text-left border-b border-white/5 sticky top-0 bg-[#131826]">
+              <tr>
+                <th>Date</th>
+                <th class="text-right">Rank</th>
+                <th class="text-right">Score</th>
+                <th class="text-right">P&amp;L next week</th>
+                <th>Exit reason</th>
+                <th>Exit date</th>
+              </tr>
+            </thead>
+            <tbody id="journey-rows"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
         <h2 class="text-lg font-semibold">Daily picks (top-N per rebalance)</h2>
         <span class="text-xs text-slate-500">From the latest backtest run · <span id="picks-source">—</span></span>
       </div>
@@ -1265,6 +1439,7 @@ async function load() {
   document.getElementById('content').classList.remove('hidden');
   renderTimeline(data);
   renderScan(data);
+  renderTickerJourney(data);
   renderPicks(data);
   renderChangelog(data);
   renderDiffs(data);
@@ -1324,6 +1499,137 @@ function drawScanRows() {
       <td class="text-right text-xs">${r.aligned ? '<span class="pill pill-green">yes</span>' : '<span class="pill pill-gray">no</span>'}</td>
     </tr>`;
   }).join('') || '<tr><td colspan="7" class="text-slate-500 text-xs py-3">No scan output yet. Run <code>bash scan_all.sh</code> to populate.</td></tr>';
+}
+
+let _journeyChart = null;
+let _journeyState = { journeys: {}, allTickers: [], current: null };
+
+function renderTickerJourney(data) {
+  const journeys = data.ticker_journeys || {};
+  const tickers = Object.keys(journeys).sort();
+  _journeyState.journeys = journeys;
+  _journeyState.allTickers = tickers;
+  document.getElementById('journey-count').textContent = tickers.length;
+
+  const sel = document.getElementById('journey-select');
+  const filter = document.getElementById('journey-filter');
+  const rows = document.getElementById('journey-rows');
+  const meta = document.getElementById('journey-meta');
+
+  if (!tickers.length) {
+    sel.innerHTML = '<option>—</option>';
+    rows.innerHTML = '<tr><td colspan="6" class="text-slate-500 text-xs py-3">No tickers met the top-N × 3 threshold yet — backtest a longer window.</td></tr>';
+    meta.textContent = '';
+    if (_journeyChart) { try { _journeyChart.destroy(); } catch(e){} _journeyChart = null; }
+    return;
+  }
+
+  // Default selection: the ticker with the most entries (most informative timeline).
+  const defaultTicker = tickers.slice().sort((a, b) => journeys[b].length - journeys[a].length)[0];
+
+  function populateSelect(matchList, selected) {
+    sel.innerHTML = matchList.map(t => `<option value="${t}" ${t === selected ? 'selected' : ''}>${t}  (${journeys[t].length} weeks)</option>`).join('');
+  }
+  populateSelect(tickers, defaultTicker);
+
+  function show(ticker) {
+    _journeyState.current = ticker;
+    const j = journeys[ticker] || [];
+    const topCount = j.filter(e => e.rank <= 20).length;
+    const winCount = j.filter(e => e.ret > 0).length;
+    const avgRet = j.length ? (j.reduce((a, e) => a + (e.ret || 0), 0) / j.length) : 0;
+    meta.textContent = `${j.length} weekly appearances · top-20 ${topCount}× · ${winCount} winning weeks · avg ret ${(avgRet*100).toFixed(2)}%`;
+    drawJourneyTable(j);
+    drawJourneyChart(ticker, j);
+  }
+
+  sel.onchange = () => show(sel.value);
+  filter.oninput = () => {
+    const q = filter.value.trim().toUpperCase();
+    const matches = q ? tickers.filter(t => t.toUpperCase().includes(q)) : tickers;
+    if (!matches.length) {
+      sel.innerHTML = '<option value="">no match</option>';
+      return;
+    }
+    const keep = matches.includes(_journeyState.current) ? _journeyState.current : matches[0];
+    populateSelect(matches, keep);
+    if (keep !== _journeyState.current) show(keep);
+  };
+
+  show(defaultTicker);
+}
+
+function drawJourneyTable(journey) {
+  const rows = document.getElementById('journey-rows');
+  if (!journey.length) {
+    rows.innerHTML = '<tr><td colspan="6" class="text-slate-500 text-xs py-3">—</td></tr>';
+    return;
+  }
+  // Newest first for readability.
+  const ordered = journey.slice().reverse();
+  rows.innerHTML = ordered.map(e => {
+    const cls = e.ret > 0 ? 'text-emerald-400' : 'text-rose-400';
+    const sign = e.ret >= 0 ? '+' : '';
+    const rankCls = e.rank <= 20 ? 'text-emerald-400' : 'text-slate-400';
+    return `<tr class="border-b border-white/5">
+      <td class="text-xs text-slate-400">${e.date}</td>
+      <td class="text-right text-xs ${rankCls}">#${e.rank}</td>
+      <td class="text-right text-xs">${e.score.toFixed(3)}</td>
+      <td class="text-right text-xs ${cls}">${sign}${(e.ret*100).toFixed(2)}%</td>
+      <td class="text-xs"><span class="pill pill-gray">${e.exit || 'hold'}</span></td>
+      <td class="text-xs text-slate-500">${e.exit_date || ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+function drawJourneyChart(ticker, journey) {
+  const ctx = document.getElementById('journey-chart').getContext('2d');
+  if (_journeyChart) { try { _journeyChart.destroy(); } catch(e){} _journeyChart = null; }
+  const labels = journey.map(e => e.date);
+  const data = journey.map(e => e.score);
+  const colors = journey.map(e => (e.ret > 0 ? '#5fe6a2' : '#ff7a8a'));
+  _journeyChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: `${ticker} score`,
+        data,
+        borderColor: '#60a5fa',
+        backgroundColor: 'rgba(96,165,250,0.08)',
+        pointBackgroundColor: colors,
+        pointBorderColor: colors,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        borderWidth: 2,
+        tension: 0.2,
+        fill: true,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { labels: { color: '#94a3b8' } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const e = journey[item.dataIndex];
+              const sign = e.ret >= 0 ? '+' : '';
+              return [
+                `${ticker} · rank #${e.rank}`,
+                `score ${e.score.toFixed(3)}`,
+                `next week: ${sign}${(e.ret*100).toFixed(2)}% (${e.exit || 'hold'})`,
+              ];
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(255,255,255,0.04)' }, title: { text: 'score', display: true, color: '#94a3b8' } },
+      }
+    }
+  });
 }
 
 function renderPicks(data) {
