@@ -71,7 +71,11 @@ write a new YAML.**
 | `quality_v1.yaml` | Trend + RSI band, lower risk profile | weekly |
 | `pre_breakout_v1.yaml` | ATR contraction + BB squeeze + volume dry-up | daily-dominant |
 | `dual_momentum_v1.yaml` | Antonacci 12-1 + absolute-momentum bond rotation (`SPY` vs `SHY`) | monthly-dominant |
+| `dual_momentum_v2.yaml` | Same as v1 but 3M lookback — reacts faster, more whipsaw | weekly |
 | `base_breakout_v1.yaml` | Stage-2 base breakout (Weinstein/IBD style) | daily-dominant |
+| `momentum_lowvol_v1.yaml` | Momentum + volatility penalty (~cross-sectional Sharpe ranker) | weekly |
+| `trend_strength_v1.yaml` | Trend-dominant (`trend` weight 0.50 + alignment bonus 0.20) | monthly-dominant |
+| `momentum_quality_combo_v1.yaml` | Balanced blend: directional + stable | weekly |
 
 `dual_momentum_v1` is the only strategy that uses the `absolute_momentum`
 block — when `SPY` 12-1 return is below `SHY` 12-1 return, the backtest
@@ -127,22 +131,95 @@ time.
 
 ## Nightly automation
 
-Two cron jobs (managed by the outer agent, not OS crontab):
+Real OS crontab on the host (`crontab -l`):
 
-- **`stock-auto-tune-nightly`** — `0 3 * * *` (03:00 Israel)
-  Runs `auto_tune_all.sh` which loops over every `formulas/*.yaml`
-  (excluding `*.bak_*.yaml`) and runs `auto_tune.py --trials 3` on each.
-  Sends a 4-6 line summary back to the chat.
-- **`stock-leaderboard-weekly`** — `0 8 * * 0` (Sunday 08:00)
-  Reads the last 7 days of `bt_summary_*.json` + `auto_tune.csv` and
-  produces a markdown table sorted by composite (`sharpe - |dd|`).
+- **`0 3 * * *`** — `auto_tune_all.sh` runs `auto_tune.py --trials 3` on every
+  formula. The window end is `$(date -Idate -d yesterday)` so the tuner
+  always evaluates against fresh data; start stays at `2023-01-01` to keep
+  the training span stable across runs.
+- **`@reboot`** — relaunches the dashboard HTTP server in a supervised
+  `tmux` session named `stock-server` (port 8000, fronted by Tailscale).
 
-To run the nightly loop manually:
+Manual triggers (long-running, run inside `tmux` sessions):
 
 ```bash
-bash auto_tune_all.sh
-# then check the latest log:
-ls -t runs/auto_tune_nightly_*.log | head -1 | xargs cat
+# Re-baseline every formula on the same uniform window (10 formulas, ~3-4h).
+tmux new -d -s stock-uniform -c $PWD 'exec ./backtest_all_uniform.sh'
+
+# Cross-regime evaluation (10 formulas x 6 historical regimes, ~1h).
+tmux new -d -s stock-regime  -c $PWD 'exec ./backtest_regimes.sh'
+
+# Watch progress:
+tmux attach -t stock-uniform   # Ctrl-b d to detach
+tail -f runs/backtest_all_uniform_*.log
+```
+
+To chain `regime` after `uniform` (avoids yfinance rate-limit collision):
+
+```bash
+tmux new -d -s stock-regime-watcher -c $PWD 'exec ./scripts/chain_regime_after_uniform.sh'
+```
+
+---
+
+## Live dashboard
+
+`dashboard.py` regenerates `docs/index.html`, `docs/data.json`,
+`docs/strategy.html`, and `docs/strategies/<formula>.json`. The HTML polls
+`data.json` every 15 s — no rebuild needed for new data, just re-run the
+Python script.
+
+Served by a Python `http.server` running in `tmux:stock-server` and exposed
+via Tailscale:
+
+```
+https://<host>.<tailnet>.ts.net/
+https://<host>.<tailnet>.ts.net/strategy.html?f=<formula_name>
+```
+
+### Per-strategy archive (`strategy.html?f=<formula>`)
+
+For every formula in the leaderboard, a dedicated page with:
+
+- **Performance timeline** — Sharpe / Return / |Max DD| across every
+  historical run (`runs/bt_summary_<formula>_*_<stamp>.json`)
+- **Daily picks** — top-N per rebalance day (W-FRI by default) with
+  per-trade scores, P&L until next rebalance, and exit reasons. Derived
+  from `runs/bt_trades_<formula>_<universe>_<stamp>.csv`.
+- **Accepted parameter changes** — from `runs/auto_tune_state.json`
+  (`formulas.<name>.yaml.change_log`)
+- **YAML param diffs** — between consecutive `formulas/<name>.bak_*.yaml`
+  snapshots
+- **All auto-tune trials** — accepted *and* rejected, from
+  `runs/auto_tune.csv`
+
+### Regime matrix
+
+Section on the main page that compares every strategy across every named
+regime defined in `regimes.json`:
+
+| | 2018 vol | 2020 COVID | 2021 bull | 2022 bear | AI 2023-24 | 2025 |
+|---|---|---|---|---|---|---|
+| momentum_v1 | … | … | … | … | … | … |
+| dual_momentum_v1 | … | … | … | … | … | … |
+| … | | | | | | |
+
+Best cell per column is highlighted. Metric switcher: `sharpe`,
+`total_return`, `max_drawdown`, `alpha_vs_benchmark`.
+
+A **current-regime banner** at the top classifies SPY's latest 60d state
+(`bull` / `bear` / `choppy` / `crash`) using a simple heuristic
+(`run_regimes.classify_current_regime()` — last 60d return, annualised
+vol, position vs MA200) and recommends the historically-best strategy for
+the matching regime kind.
+
+To refresh the matrix:
+
+```bash
+python run_regimes.py        # one wide fetch, 60 backtests in-memory
+python dashboard.py          # writes docs/regime_matrix into data.json
+# or just:
+bash backtest_regimes.sh
 ```
 
 ---
@@ -164,20 +241,38 @@ All pure functions, no I/O, no globals.
 ```
 stock-screener/
 ├── engine/
-│   ├── score.py          # math — DO NOT touch when adding strategies
-│   ├── backtest.py       # walk-forward backtester + exit logic + regime rotation
-│   ├── indicators.py     # pure indicator functions
-│   ├── atr.py            # ATR + base detection helpers
-│   ├── data.py           # yfinance / parquet provider
-│   └── universe.py       # S&P 500 list + liquidity filter
-├── formulas/             # YAML strategy configs (one per strategy)
-├── runs/                 # all backtest output, auto-tune state, logs
-├── auto_tune.py          # walk-forward tuner with guardrails
-├── auto_tune_all.sh      # nightly wrapper, loops over all formulas
-├── compare.py            # side-by-side strategy comparison
-├── run.py                # CLI entry point (scan / backtest)
-├── README.md             # this file
-└── CLAUDE.md             # context for the agent maintaining this repo
+│   ├── score.py                 # math — DO NOT touch when adding strategies
+│   ├── backtest.py              # walk-forward backtester + exit logic + regime rotation
+│   ├── indicators.py            # pure indicator functions
+│   ├── atr.py                   # ATR + base detection helpers
+│   ├── data.py                  # yfinance / parquet provider
+│   └── universe.py              # S&P 500 list + liquidity filter
+├── formulas/                    # YAML strategy configs (one per strategy)
+├── runs/                        # all backtest output, auto-tune state, logs
+│   ├── auto_tune.csv            # every tuning trial (accepted+rejected)
+│   ├── auto_tune_state.json     # cooldowns, change_log, monthly baselines
+│   ├── bt_summary_*.json        # one per backtest run
+│   ├── bt_trades_*.csv          # per-trade detail (powers Daily picks)
+│   ├── regime_matrix.json       # strategy × regime grid (from run_regimes.py)
+│   └── regime_current.json      # current SPY regime classification
+├── docs/                        # served by stock-server tmux (port 8000)
+│   ├── index.html               # main dashboard (Tailwind + Chart.js, polls data.json)
+│   ├── data.json                # gitignored, regenerated every dashboard.py call
+│   ├── strategy.html            # per-strategy archive viewer (?f=<name>)
+│   └── strategies/<name>.json   # per-strategy history payload
+├── scripts/
+│   └── chain_regime_after_uniform.sh   # tmux watcher: regime after uniform
+├── auto_tune.py                 # walk-forward tuner with guardrails
+├── auto_tune_all.sh             # nightly wrapper (cron 03:00), end=yesterday
+├── backtest_all_uniform.sh      # all formulas, uniform window, end=yesterday
+├── backtest_regimes.sh          # wrapper for run_regimes.py + dashboard refresh
+├── run_regimes.py               # one wide fetch + 60 in-memory backtests
+├── regimes.json                 # named historical regimes (edit to add/move)
+├── dashboard.py                 # regenerates docs/* from runs/*
+├── compare.py                   # side-by-side strategy comparison
+├── run.py                       # CLI entry point (scan / backtest)
+├── README.md                    # this file
+└── CLAUDE.md                    # context for the agent maintaining this repo
 ```
 
 ---
