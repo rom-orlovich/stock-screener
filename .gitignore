@@ -30,3 +30,6 @@ Thumbs.db
 
 # Strategy backups (kept locally only, not pushed)
 formulas/*.bak_*.yaml
+
+# Playwright-cli session debug artifacts
+.playwright-cli/

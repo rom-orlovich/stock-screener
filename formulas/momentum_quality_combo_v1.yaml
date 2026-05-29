@@ -1,0 +1,44 @@
+# Momentum + Quality combo — a balanced blend that wants names that are both
+# trending UP and stable (low vol). Less spiky than pure momentum, more
+# directional than pure quality.
+version: momentum_quality_combo_v1
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 20
+  sma_slow: 100
+  momentum_lookback: 126           # ~6M
+  breakout_lookback: 55
+  volatility_lookback: 90
+
+# Balanced weighting: momentum + trend (directional) ~= volatility (stability).
+timeframe_score_weights:
+  momentum: 0.30
+  trend: 0.25
+  rsi: 0.10
+  breakout: 0.05
+  volatility: 0.30
+  atr_contraction: 0.00
+  volume_dryup: 0.00
+  bb_squeeze: 0.00
+
+rsi_band: [45, 70]
+
+timeframe_weights:
+  daily: 0.20
+  weekly: 0.40
+  monthly: 0.40
+
+alignment_bonus: 0.10
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [10, 30]
+  sma_slow: [60, 150]
+  momentum_lookback: [60, 250]
+  breakout_lookback: [20, 100]
+  volatility_lookback: [30, 180]
+  alignment_bonus: [0.0, 0.20]
+  rsi_band_low: [40, 55]
+  rsi_band_high: [60, 80]

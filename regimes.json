@@ -1,0 +1,53 @@
+{
+  "_comment": "Named market regimes for cross-period strategy evaluation. Edit windows here; run_regimes.py picks them up.",
+  "regimes": [
+    {
+      "name": "vol_2018",
+      "label": "2018 vol shocks",
+      "start": "2018-01-01",
+      "end": "2018-12-31",
+      "kind": "choppy",
+      "note": "Feb volmageddon + Q4 fed-pivot panic. Tests strategies' behavior in sharp drawdowns inside a broader sideways tape."
+    },
+    {
+      "name": "covid_2020",
+      "label": "2020 COVID crash + V-recovery",
+      "start": "2020-02-01",
+      "end": "2020-12-31",
+      "kind": "crash_then_bull",
+      "note": "March 35% crash then liquidity-driven V-shape. Stress test for regime detection / stops."
+    },
+    {
+      "name": "bull_2021",
+      "label": "2021 pure bull",
+      "start": "2021-01-01",
+      "end": "2021-12-31",
+      "kind": "bull",
+      "note": "Low-vol, broad bull. Trend/momentum should dominate; mean reversion should lag."
+    },
+    {
+      "name": "bear_2022",
+      "label": "2022 Fed bear",
+      "start": "2022-01-01",
+      "end": "2022-12-31",
+      "kind": "bear",
+      "note": "Tightening cycle, growth crash. Long-only strategies suffer; dual_momentum should rotate to bonds."
+    },
+    {
+      "name": "ai_2023_2024",
+      "label": "2023-2024 AI / mega-cap bull",
+      "start": "2023-01-01",
+      "end": "2024-12-31",
+      "kind": "narrow_bull",
+      "note": "Narrow leadership (Nvidia / mag-7). Momentum / breakout strategies should shine; low-vol may underperform."
+    },
+    {
+      "name": "recent_2025",
+      "label": "2025 → current",
+      "start": "2025-01-01",
+      "end": null,
+      "kind": "current",
+      "note": "Year-to-date. Slot for the live regime. `end=null` -> use yesterday."
+    }
+  ]
+}

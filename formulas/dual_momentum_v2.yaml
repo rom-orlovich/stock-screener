@@ -1,0 +1,73 @@
+# Dual momentum — short-horizon variant (3M lookback instead of 12M).
+# Same regime-rotation logic as v1 (cash/SHY fallback when SPY trend is weak)
+# but reacts much faster — catches trend reversals earlier at the cost of
+# more whipsaws.
+version: dual_momentum_v2
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 50
+  sma_slow: 200
+  momentum_lookback: 63            # ~3 months (was 252 in v1)
+  momentum_skip_recent: 10         # skip last 2 weeks
+  breakout_lookback: 126           # ~6M high
+
+  # Inherited knobs (engine compat).
+  atr_period: 14
+  atr_contraction_lookback: 20
+  atr_contraction_threshold: 0.30
+  vol_short_lookback: 20
+  vol_long_lookback: 60
+  vol_dryup_threshold: 0.80
+  bb_period: 20
+  bb_squeeze_lookback: 60
+  bb_squeeze_percentile: 0.20
+
+timeframe_score_weights:
+  momentum: 0.60
+  trend: 0.25
+  rsi: 0.05
+  breakout: 0.10
+  volatility: 0.00
+  atr_contraction: 0.00
+  volume_dryup: 0.00
+  bb_squeeze: 0.00
+
+rsi_band: [40, 75]
+
+# Weekly dominates — short-horizon momentum responds best on weekly bars.
+timeframe_weights:
+  daily: 0.20
+  weekly: 0.50
+  monthly: 0.30
+
+alignment_bonus: 0.10
+
+# Faster regime check than v1: 63d/10d skip — catches downturns earlier.
+absolute_momentum:
+  benchmark: SPY
+  bond_proxy: SHY
+  lookback: 63
+  skip_recent: 10
+  cash_fallback: SHY
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [20, 80]
+  sma_slow: [120, 300]
+  momentum_lookback: [30, 180]
+  momentum_skip_recent: [0, 21]
+  breakout_lookback: [60, 252]
+  atr_period: [7, 28]
+  atr_contraction_lookback: [10, 60]
+  atr_contraction_threshold: [0.10, 0.50]
+  vol_short_lookback: [10, 40]
+  vol_long_lookback: [30, 120]
+  vol_dryup_threshold: [0.50, 0.95]
+  bb_period: [10, 30]
+  bb_squeeze_lookback: [30, 120]
+  bb_squeeze_percentile: [0.05, 0.40]
+  alignment_bonus: [0.0, 0.20]
+  rsi_band_low: [30, 50]
+  rsi_band_high: [60, 85]

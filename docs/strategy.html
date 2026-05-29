@@ -1,0 +1,351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>strategy archive — stock-screener</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<style>
+  :root { color-scheme: dark; }
+  body { background: #0b0f1a; color: #d6dae3; font-family: ui-sans-serif, system-ui, -apple-system; }
+  .card { background: #131826; border: 1px solid #1f2638; border-radius: 14px; }
+  .pill { display:inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .pill-green { background: #0f3a25; color: #5fe6a2; }
+  .pill-red   { background: #3a0f1a; color: #ff7a8a; }
+  .pill-gray  { background: #1f2638; color: #9aa4bb; }
+  .num { font-variant-numeric: tabular-nums; }
+  table.compact td, table.compact th { padding: 4px 8px; }
+  .chart-box { position: relative; height: 280px; max-height: 280px; width: 100%; }
+  .scroll-box { max-height: 360px; overflow-y: auto; }
+  .delta-up   { color: #5fe6a2; }
+  .delta-down { color: #ff7a8a; }
+  details > summary { cursor: pointer; list-style: none; }
+  details > summary::-webkit-details-marker { display: none; }
+</style>
+</head>
+<body class="min-h-screen">
+<header class="max-w-6xl mx-auto px-4 pt-8 pb-4">
+  <div class="flex items-center justify-between flex-wrap gap-3">
+    <div>
+      <a href="index.html" class="text-xs text-slate-400 hover:text-sky-300">← back to leaderboard</a>
+      <h1 class="text-3xl font-bold tracking-tight mt-1" id="title">strategy archive</h1>
+      <p class="text-slate-400 mt-1" id="subtitle">Every backtest run, every accepted parameter change, every auto-tune trial.</p>
+    </div>
+  </div>
+</header>
+
+<main class="max-w-6xl mx-auto px-4 pb-16 space-y-6">
+
+  <section id="missing" class="card p-5 hidden">
+    <div class="text-rose-300 text-sm">No archive found for this formula. Pass <code>?f=&lt;formula_name&gt;</code> in the URL, e.g. <code>strategy.html?f=momentum_v1</code>.</div>
+  </section>
+
+  <section id="content" class="space-y-6 hidden">
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <h2 class="text-lg font-semibold">Performance timeline</h2>
+        <span class="text-xs text-slate-500">Each point = one backtest run. Hover the chart for the run timestamp.</span>
+      </div>
+      <div class="chart-box mt-3"><canvas id="timeline-chart"></canvas></div>
+      <div class="overflow-x-auto mt-3">
+        <table class="w-full text-sm compact num">
+          <thead class="text-slate-400 text-left border-b border-white/5">
+            <tr>
+              <th>Run</th><th>Window</th>
+              <th class="text-right">Return</th><th class="text-right">Sharpe</th>
+              <th class="text-right">Max DD</th><th class="text-right">Win%</th>
+              <th class="text-right">α vs SPY</th><th class="text-right">Trades</th>
+            </tr>
+          </thead>
+          <tbody id="timeline-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <h2 class="text-lg font-semibold">Daily picks (top-N per rebalance)</h2>
+        <span class="text-xs text-slate-500">From the latest backtest run · <span id="picks-source">—</span></span>
+      </div>
+      <p class="text-xs text-slate-500 mt-1">Each rebalance day (default W-FRI) the strategy ranks every ticker and holds the top N until the next rebalance.</p>
+      <div class="flex items-center gap-3 mt-3 flex-wrap">
+        <label class="text-xs text-slate-400">Jump to date:</label>
+        <select id="picks-date" class="bg-[#0b0f1a] border border-white/10 text-sm px-2 py-1 rounded"></select>
+        <span class="text-xs text-slate-500" id="picks-meta">—</span>
+      </div>
+      <div class="overflow-x-auto mt-3">
+        <table class="w-full text-sm compact num">
+          <thead class="text-slate-400 text-left border-b border-white/5">
+            <tr>
+              <th>#</th><th>Ticker</th>
+              <th class="text-right">Score</th>
+              <th class="text-right">P&amp;L (until next rebal)</th>
+              <th>Exit reason</th>
+              <th>Exit date</th>
+            </tr>
+          </thead>
+          <tbody id="picks-rows"></tbody>
+        </table>
+      </div>
+      <details class="mt-4">
+        <summary class="text-sm text-sky-300 hover:underline">All rebalance days (collapsed)</summary>
+        <div class="scroll-box mt-2 border border-white/5 rounded">
+          <table class="w-full text-sm compact num">
+            <thead class="text-slate-400 text-left border-b border-white/5 sticky top-0 bg-[#131826]">
+              <tr><th>Date</th><th class="text-right">Picks</th><th class="text-right">Avg P&amp;L</th><th>Top 3</th></tr>
+            </thead>
+            <tbody id="picks-summary-rows"></tbody>
+          </table>
+        </div>
+      </details>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <h2 class="text-lg font-semibold">Accepted parameter changes</h2>
+        <span class="text-xs text-slate-500">From <code>auto_tune_state.json</code> — only mutations that passed walk-forward.</span>
+      </div>
+      <div class="overflow-x-auto mt-3">
+        <table class="w-full text-sm compact num">
+          <thead class="text-slate-400 text-left border-b border-white/5">
+            <tr><th>When</th><th>Parameter</th><th>Direction</th><th class="text-right">From</th><th class="text-right">To</th><th class="text-right">Δ%</th></tr>
+          </thead>
+          <tbody id="changelog-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <h2 class="text-lg font-semibold">YAML param diffs (snapshot → snapshot)</h2>
+        <span class="text-xs text-slate-500">Derived from <code>formulas/&lt;name&gt;.bak_*.yaml</code> backups + current file.</span>
+      </div>
+      <div id="diff-blocks" class="mt-3 space-y-3 text-sm"></div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <h2 class="text-lg font-semibold">Auto-tune trials (all attempts)</h2>
+        <span class="text-xs text-slate-500">Including rejected — useful to see what the tuner is exploring.</span>
+      </div>
+      <div class="overflow-x-auto mt-3 scroll-box">
+        <table class="w-full text-sm compact num">
+          <thead class="text-slate-400 text-left border-b border-white/5 sticky top-0 bg-[#131826]">
+            <tr>
+              <th>When</th><th>Param</th><th>Direction</th>
+              <th class="text-right">From</th><th class="text-right">To</th>
+              <th class="text-right">Folds</th>
+              <th class="text-right">avg composite</th><th class="text-right">baseline</th>
+              <th>Result</th>
+            </tr>
+          </thead>
+          <tbody id="trials-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<script>
+const fmtPct = v => (v === null || v === undefined || v === '') ? '—' : (Number(v) * 100).toFixed(2) + '%';
+const fmtPctSigned = v => (v === null || v === undefined || v === '') ? '—' : (Number(v) >= 0 ? '+' : '') + (Number(v) * 100).toFixed(2) + '%';
+const fmtNum = (v, d=2) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);
+
+function qs(name) {
+  return new URLSearchParams(location.search).get(name);
+}
+
+async function load() {
+  const f = qs('f');
+  if (!f) { document.getElementById('missing').classList.remove('hidden'); return; }
+  let data;
+  try {
+    const res = await fetch(`strategies/${encodeURIComponent(f)}.json?_=${Date.now()}`, { cache: 'no-store' });
+    if (!res.ok) throw new Error();
+    data = await res.json();
+  } catch {
+    document.getElementById('missing').classList.remove('hidden');
+    return;
+  }
+  document.title = `${data.formula} — archive`;
+  document.getElementById('title').textContent = data.formula;
+  const baseline = data.monthly_baseline || {};
+  document.getElementById('subtitle').textContent =
+    `${(data.timeline||[]).length} backtest runs · ${(data.picks_by_date||[]).length} rebalance days · `
+    + `${(data.change_log||[]).length} accepted param changes · ${(data.trials||[]).length} auto-tune trials · `
+    + `baseline month ${baseline.month || '—'} (avg composite ${fmtNum(baseline.composite_avg, 3)})`;
+  document.getElementById('content').classList.remove('hidden');
+  renderTimeline(data);
+  renderPicks(data);
+  renderChangelog(data);
+  renderDiffs(data);
+  renderTrials(data);
+}
+
+function renderPicks(data) {
+  const picks = data.picks_by_date || [];
+  const sel = document.getElementById('picks-date');
+  const src = document.getElementById('picks-source');
+  src.textContent = data.picks_source || 'no trades file';
+  if (!picks.length) {
+    sel.innerHTML = '<option>—</option>';
+    document.getElementById('picks-rows').innerHTML = '<tr><td colspan="6" class="text-slate-500 text-xs py-3">No trades recorded for the latest run.</td></tr>';
+    document.getElementById('picks-summary-rows').innerHTML = '';
+    return;
+  }
+  sel.innerHTML = picks.map(d => `<option value="${d.date}">${d.date}  (${d.n} picks · avg ${(d.avg_ret*100).toFixed(2)}%)</option>`).join('');
+  sel.onchange = () => renderPicksRows(picks, sel.value);
+  renderPicksRows(picks, picks[0].date);
+
+  const ssr = document.getElementById('picks-summary-rows');
+  ssr.innerHTML = picks.map(d => {
+    const top3 = d.picks.slice(0, 3).map(p => p.ticker).join(', ');
+    const cls = d.avg_ret > 0 ? 'text-emerald-400' : 'text-rose-400';
+    return `<tr class="border-b border-white/5 cursor-pointer hover:bg-white/5" data-date="${d.date}">
+      <td class="text-xs text-slate-400">${d.date}</td>
+      <td class="text-right text-xs">${d.n}</td>
+      <td class="text-right text-xs ${cls}">${(d.avg_ret*100).toFixed(2)}%</td>
+      <td class="text-xs text-slate-300">${top3}</td>
+    </tr>`;
+  }).join('');
+  ssr.querySelectorAll('tr').forEach(tr => {
+    tr.addEventListener('click', () => {
+      const d = tr.dataset.date;
+      sel.value = d;
+      renderPicksRows(picks, d);
+      document.getElementById('picks-rows').scrollIntoView({ behavior: 'smooth', block: 'center' });
+    });
+  });
+}
+
+function renderPicksRows(picks, date) {
+  const day = picks.find(d => d.date === date);
+  const tbody = document.getElementById('picks-rows');
+  const meta = document.getElementById('picks-meta');
+  if (!day) { tbody.innerHTML = ''; meta.textContent = ''; return; }
+  meta.textContent = `${day.n} picks · avg P&L ${(day.avg_ret*100).toFixed(2)}%`;
+  tbody.innerHTML = day.picks.map((p, i) => {
+    const cls = p.ret > 0 ? 'text-emerald-400' : 'text-rose-400';
+    const sign = p.ret >= 0 ? '+' : '';
+    return `<tr class="border-b border-white/5">
+      <td class="text-xs text-slate-500">${i + 1}</td>
+      <td class="text-sm font-medium">${p.ticker}</td>
+      <td class="text-right text-xs">${p.score.toFixed(3)}</td>
+      <td class="text-right text-xs ${cls}">${sign}${(p.ret*100).toFixed(2)}%</td>
+      <td class="text-xs"><span class="pill pill-gray">${p.exit || 'hold'}</span></td>
+      <td class="text-xs text-slate-500">${p.exit_date || ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+function renderTimeline(data) {
+  const tl = data.timeline || [];
+  const tbody = document.getElementById('timeline-rows');
+  tbody.innerHTML = tl.map(r => {
+    const ret = r.total_return, alpha = r.alpha_vs_benchmark;
+    return `<tr class="border-b border-white/5">
+      <td class="text-xs text-slate-400">${r.iso || r.stamp}</td>
+      <td class="text-xs text-slate-500">${r.start} → ${r.end}<br><span class="pill pill-gray">${r.universe || ''}</span></td>
+      <td class="text-right ${ret > 0 ? 'text-emerald-400' : 'text-rose-400'}">${fmtPct(ret)}</td>
+      <td class="text-right">${fmtNum(r.sharpe)}</td>
+      <td class="text-right text-rose-400">${fmtPct(r.max_drawdown)}</td>
+      <td class="text-right">${fmtPct(r.win_rate)}</td>
+      <td class="text-right ${alpha > 0 ? 'text-emerald-400' : 'text-rose-400'}">${fmtPctSigned(alpha)}</td>
+      <td class="text-right text-slate-400">${r.n_trades || 0}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="8" class="text-slate-500 text-xs py-3">No backtest runs found.</td></tr>';
+
+  const ctx = document.getElementById('timeline-chart').getContext('2d');
+  const labels = tl.map(r => r.iso || r.stamp);
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Sharpe', data: tl.map(r => r.sharpe), borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.1)', tension: 0.2, borderWidth: 2, yAxisID: 'y' },
+        { label: 'Total return', data: tl.map(r => r.total_return), borderColor: '#5fe6a2', tension: 0.2, borderWidth: 2, yAxisID: 'y1' },
+        { label: '|Max DD|', data: tl.map(r => Math.abs(r.max_drawdown || 0)), borderColor: '#ff7a8a', borderDash: [4,4], tension: 0.2, borderWidth: 1.5, yAxisID: 'y1' },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: { legend: { labels: { color: '#94a3b8' }}},
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' }},
+        y:  { position: 'left',  ticks: { color: '#60a5fa' }, grid: { color: 'rgba(255,255,255,0.04)' }, title: { text: 'Sharpe', display: true, color: '#60a5fa' }},
+        y1: { position: 'right', ticks: { color: '#5fe6a2', callback: v => (v*100).toFixed(0)+'%' }, grid: { drawOnChartArea: false }, title: { text: 'Return / |DD|', display: true, color: '#5fe6a2' }},
+      }
+    }
+  });
+}
+
+function renderChangelog(data) {
+  const tbody = document.getElementById('changelog-rows');
+  const log = (data.change_log || []).slice().reverse();  // newest first
+  tbody.innerHTML = log.map(c => {
+    let pct = '';
+    if (typeof c.old === 'number' && typeof c.new === 'number' && c.old !== 0) {
+      pct = (((c.new - c.old) / Math.abs(c.old)) * 100).toFixed(1) + '%';
+    }
+    const cls = c.direction === 'up' ? 'delta-up' : 'delta-down';
+    return `<tr class="border-b border-white/5">
+      <td class="text-xs text-slate-400">${(c.ts || '').slice(0,19).replace('T',' ')}</td>
+      <td class="text-xs">${c.param}</td>
+      <td class="text-xs"><span class="pill pill-gray ${cls}">${c.direction || ''}</span></td>
+      <td class="text-right text-xs">${c.old}</td>
+      <td class="text-right text-xs">${c.new}</td>
+      <td class="text-right text-xs ${cls}">${pct}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="6" class="text-slate-500 text-xs py-3">No accepted changes yet — tuner has not modified this strategy.</td></tr>';
+}
+
+function renderDiffs(data) {
+  const wrap = document.getElementById('diff-blocks');
+  const diffs = (data.param_diffs || []).slice().reverse();  // newest first
+  if (!diffs.length) {
+    wrap.innerHTML = '<div class="text-xs text-slate-500">No backups (.bak_*.yaml) recorded for this formula yet.</div>';
+    return;
+  }
+  wrap.innerHTML = diffs.map(d => `
+    <details class="card p-3" open>
+      <summary class="font-semibold text-sm text-sky-300">${d.from_stamp} → ${d.to_stamp}  <span class="text-slate-500 text-xs">(${d.changes.length} change${d.changes.length===1?'':'s'})</span></summary>
+      <table class="w-full text-sm compact num mt-2">
+        <thead class="text-slate-400 text-left border-b border-white/5">
+          <tr><th>Key</th><th class="text-right">From</th><th class="text-right">To</th></tr>
+        </thead>
+        <tbody>${d.changes.map(c => `
+          <tr class="border-b border-white/5">
+            <td class="text-xs">${c.key}</td>
+            <td class="text-right text-xs text-slate-400">${JSON.stringify(c.from)}</td>
+            <td class="text-right text-xs">${JSON.stringify(c.to)}</td>
+          </tr>`).join('')}</tbody>
+      </table>
+    </details>`).join('');
+}
+
+function renderTrials(data) {
+  const tbody = document.getElementById('trials-rows');
+  const rows = data.trials || [];
+  tbody.innerHTML = rows.map(r => {
+    const accepted = String(r.accepted).toLowerCase() === 'true';
+    return `<tr class="border-b border-white/5">
+      <td class="text-xs text-slate-400">${(r.ts || '').slice(0,19).replace('T',' ')}</td>
+      <td class="text-xs">${r.param || ''}</td>
+      <td class="text-xs">${r.direction || ''}</td>
+      <td class="text-right text-xs text-slate-400">${r.old}</td>
+      <td class="text-right text-xs">${r.new}</td>
+      <td class="text-right text-xs">${r.folds_passed || 0}</td>
+      <td class="text-right text-xs">${fmtNum(r.avg_composite, 3)}</td>
+      <td class="text-right text-xs text-slate-500">${fmtNum(r.baseline_avg, 3)}</td>
+      <td><span class="pill ${accepted ? 'pill-green' : 'pill-red'}">${accepted ? 'accepted' : 'rejected'}</span></td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="9" class="text-slate-500 text-xs py-3">No trials recorded.</td></tr>';
+}
+
+load();
+</script>
+</body>
+</html>

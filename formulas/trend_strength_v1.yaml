@@ -1,0 +1,42 @@
+# Trend-strength — long names where the trend confirmation is overwhelming.
+# Heavy `trend` weight plus a high alignment bonus pushes the ranking toward
+# names that are unambiguously up on every timeframe.
+version: trend_strength_v1
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 50
+  sma_slow: 200                    # classic long-term trend filter
+  momentum_lookback: 200
+  breakout_lookback: 252           # 52-week high context for the breakout sub
+
+timeframe_score_weights:
+  momentum: 0.25
+  trend: 0.50                      # dominant component
+  rsi: 0.05
+  breakout: 0.20
+  volatility: 0.00
+  atr_contraction: 0.00
+  volume_dryup: 0.00
+  bb_squeeze: 0.00
+
+rsi_band: [50, 75]
+
+# Monthly is decisive — trend-following is a slow signal.
+timeframe_weights:
+  daily: 0.10
+  weekly: 0.30
+  monthly: 0.60
+
+alignment_bonus: 0.20              # big reward when all 3 timeframes align
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [20, 80]
+  sma_slow: [120, 300]
+  momentum_lookback: [100, 300]
+  breakout_lookback: [120, 320]
+  alignment_bonus: [0.05, 0.30]
+  rsi_band_low: [45, 55]
+  rsi_band_high: [65, 80]
