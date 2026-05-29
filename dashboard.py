@@ -25,6 +25,7 @@ from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
+import pandas as pd
 import yaml
 
 ROOT = Path(__file__).resolve().parent
@@ -158,6 +159,18 @@ def collect_strategies(indexed: dict | None = None) -> list[dict]:
         trades = _read_trades(trades_fp) if trades_fp.exists() else []
         tsum = _trade_summary(trades)
 
+        # Pearson correlation between strategy score and realised return.
+        # Tells "is the signal predictive?" apart from "did the market drift up?".
+        corr_pearson = None
+        if len(trades) >= 2:
+            trades_df = pd.DataFrame(trades)
+            if "score" in trades_df.columns and "ret" in trades_df.columns:
+                s_col = pd.to_numeric(trades_df["score"], errors="coerce")
+                r_col = pd.to_numeric(trades_df["ret"], errors="coerce")
+                c = s_col.corr(r_col)
+                if c is not None and pd.notna(c):
+                    corr_pearson = float(c)
+
         stats = summary.get("stats", {}) or {}
         cfg = summary.get("config", {}) or {}
         out.append({
@@ -175,6 +188,7 @@ def collect_strategies(indexed: dict | None = None) -> list[dict]:
             "trades_top_wins": tsum["top_wins"],
             "trades_top_losses": tsum["top_losses"],
             "trades_total": len(trades),
+            "corr_pearson": round(corr_pearson, 4) if corr_pearson is not None else None,
             "history_count": len(files),
         })
 
@@ -577,6 +591,7 @@ python dashboard.py && python -m http.server -d docs 8000</code></pre>
             <th class="text-right">Win%</th>
             <th class="text-right">Trades</th>
             <th class="text-right">vs SPY</th>
+            <th class="text-right" title="Pearson correlation: score vs realised return. &gt;0.05 reliable, &lt;0 inverted signal">Predict</th>
             <th class="text-right">Window</th>
           </tr>
         </thead>
@@ -702,6 +717,7 @@ function renderLeaderboard(data) {
       <td class="text-right">${fmtPct(s.stats.win_rate)}</td>
       <td class="text-right text-slate-400">${s.stats.n_trades || s.trades_total || 0}</td>
       <td class="text-right ${alpha > 0 ? 'text-emerald-400' : 'text-rose-400'}">${fmtPct(alpha)}</td>
+      <td class="text-right ${s.corr_pearson == null ? 'text-slate-500' : (s.corr_pearson > 0.05 ? 'text-emerald-400' : (s.corr_pearson < 0 ? 'text-rose-400' : 'text-slate-400'))}" title="Pearson corr(score, ret)">${s.corr_pearson == null ? '—' : Number(s.corr_pearson).toFixed(3)}</td>
       <td class="text-right text-xs text-slate-500">${s.start || '—'}<br>${s.end || '—'}</td>`;
     lb.appendChild(tr);
   });
