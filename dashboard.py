@@ -282,6 +282,45 @@ def _param_diffs(snaps: list[dict]) -> list[dict]:
     return diffs
 
 
+def _latest_scan_for(formula: str) -> tuple[Path | None, str | None]:
+    """Find the most recent scan_<formula>_*.csv produced by run_scans.py.
+    Returns (path, stamp) or (None, None). The scan file name shape is
+    scan_<formula>_<universe>_<YYYYMMDD>_<HHMMSS>.csv, e.g.
+    scan_momentum_v1_sp500_20260529_173011.csv."""
+    files = list(RUNS.glob(f"scan_{formula}_*.csv"))
+    if not files:
+        return None, None
+    files.sort(key=lambda p: _stamp_from_name(p.name.replace(".csv", ".json")),
+               reverse=True)
+    fp = files[0]
+    m = re.search(r"_(\d{8}_\d{6})\.csv$", fp.name)
+    return fp, (m.group(1) if m else None)
+
+
+def _scan_rows(fp: Path, limit: int = 600) -> list[dict]:
+    rows = []
+    try:
+        with fp.open() as f:
+            for r in csv.DictReader(f):
+                def _f(k):
+                    v = r.get(k)
+                    try:
+                        return round(float(v), 4) if v not in (None, "") else None
+                    except (TypeError, ValueError):
+                        return None
+                rows.append({
+                    "ticker": r.get("ticker", ""),
+                    "score": _f("score"),
+                    "aligned": (str(r.get("aligned", "")).lower() == "true"),
+                    "daily": _f("daily"),
+                    "weekly": _f("weekly"),
+                    "monthly": _f("monthly"),
+                })
+    except Exception:
+        return []
+    return rows[:limit]
+
+
 def _picks_by_date(trades: list[dict]) -> list[dict]:
     """Group trades by rebalance day (`enter`), keep the top-N highest-scoring
     picks per day with their realised P&L and exit reason. Sorted newest day
@@ -375,6 +414,10 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
         snaps = _load_yaml_snapshots(basename)
         diffs = _param_diffs(snaps)
 
+        # Latest live scan (full-universe ranking, written by run_scans.py).
+        scan_fp, scan_stamp = _latest_scan_for(basename)
+        scan_rows = _scan_rows(scan_fp) if scan_fp else []
+
         out[basename] = {
             "formula": basename,
             "timeline": timeline,
@@ -385,6 +428,9 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
             "param_diffs": diffs,
             "picks_by_date": picks_by_date,
             "picks_source": latest_trades_fp.name if latest_trades_fp.exists() else None,
+            "scan_rows": scan_rows,
+            "scan_source": scan_fp.name if scan_fp else None,
+            "scan_stamp": scan_stamp,
         }
     return out
 
@@ -1055,6 +1101,40 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
 
     <div class="card p-5">
       <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Full ranking — every ticker, scored now</h2>
+          <p class="text-xs text-slate-500 mt-1">From the latest <code>run_scans.py</code> run. Top-N picks are highlighted; everything else lets you check where your candidate sits in the order.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div>scan stamp <span id="scan-stamp">—</span></div>
+          <div>source <span id="scan-source">—</span></div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mt-3 flex-wrap text-sm">
+        <input id="scan-filter" type="text" placeholder="filter ticker (e.g. NVDA, MSFT)" class="bg-[#0b0f1a] border border-white/10 px-3 py-1.5 rounded w-56" />
+        <span class="text-xs text-slate-500">showing <span id="scan-shown">0</span> of <span id="scan-total">0</span></span>
+        <span class="text-xs text-emerald-400">green row = top 20 (held by the strategy this week)</span>
+      </div>
+      <div class="overflow-x-auto mt-3 scroll-box" style="max-height: 480px;">
+        <table class="w-full text-sm compact num">
+          <thead class="text-slate-400 text-left border-b border-white/5 sticky top-0 bg-[#131826]">
+            <tr>
+              <th class="cursor-pointer" data-sort="rank">#</th>
+              <th class="cursor-pointer" data-sort="ticker">Ticker</th>
+              <th class="text-right cursor-pointer" data-sort="score">Score</th>
+              <th class="text-right cursor-pointer" data-sort="daily">Daily</th>
+              <th class="text-right cursor-pointer" data-sort="weekly">Weekly</th>
+              <th class="text-right cursor-pointer" data-sort="monthly">Monthly</th>
+              <th class="text-right">Aligned</th>
+            </tr>
+          </thead>
+          <tbody id="scan-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
         <h2 class="text-lg font-semibold">Daily picks (top-N per rebalance)</h2>
         <span class="text-xs text-slate-500">From the latest backtest run · <span id="picks-source">—</span></span>
       </div>
@@ -1164,14 +1244,70 @@ async function load() {
   const baseline = data.monthly_baseline || {};
   document.getElementById('subtitle').textContent =
     `${(data.timeline||[]).length} backtest runs · ${(data.picks_by_date||[]).length} rebalance days · `
-    + `${(data.change_log||[]).length} accepted param changes · ${(data.trials||[]).length} auto-tune trials · `
-    + `baseline month ${baseline.month || '—'} (avg composite ${fmtNum(baseline.composite_avg, 3)})`;
+    + `${(data.scan_rows||[]).length} tickers in latest scan · ${(data.change_log||[]).length} accepted param changes · `
+    + `${(data.trials||[]).length} auto-tune trials · baseline month ${baseline.month || '—'} (avg composite ${fmtNum(baseline.composite_avg, 3)})`;
   document.getElementById('content').classList.remove('hidden');
   renderTimeline(data);
+  renderScan(data);
   renderPicks(data);
   renderChangelog(data);
   renderDiffs(data);
   renderTrials(data);
+}
+
+let _scanState = { rows: [], topSet: new Set(), sortKey: 'rank', sortAsc: true, filter: '' };
+
+function renderScan(data) {
+  const rows = data.scan_rows || [];
+  document.getElementById('scan-stamp').textContent = data.scan_stamp ? `${data.scan_stamp.slice(0,4)}-${data.scan_stamp.slice(4,6)}-${data.scan_stamp.slice(6,8)} ${data.scan_stamp.slice(9,11)}:${data.scan_stamp.slice(11,13)}` : '—';
+  document.getElementById('scan-source').textContent = data.scan_source || 'no scan yet — run `bash scan_all.sh`';
+  // Pre-rank + remember the top-20 tickers so we can paint them green.
+  const ranked = rows.map((r, i) => ({ ...r, rank: i + 1 }));
+  const topPicks = (data.picks_by_date && data.picks_by_date[0]) || { picks: [] };
+  _scanState.rows = ranked;
+  _scanState.topSet = new Set(topPicks.picks.map(p => p.ticker));
+  document.getElementById('scan-total').textContent = ranked.length;
+  drawScanRows();
+  document.getElementById('scan-filter').oninput = e => { _scanState.filter = e.target.value.trim().toUpperCase(); drawScanRows(); };
+  document.querySelectorAll('[data-sort]').forEach(th => {
+    th.onclick = () => {
+      const k = th.dataset.sort;
+      _scanState.sortAsc = (_scanState.sortKey === k) ? !_scanState.sortAsc : (k === 'ticker' || k === 'rank');
+      _scanState.sortKey = k;
+      drawScanRows();
+    };
+  });
+}
+
+function drawScanRows() {
+  let list = _scanState.rows;
+  if (_scanState.filter) {
+    list = list.filter(r => (r.ticker || '').toUpperCase().includes(_scanState.filter));
+  }
+  const k = _scanState.sortKey;
+  const asc = _scanState.sortAsc;
+  list = [...list].sort((a, b) => {
+    let av = a[k], bv = b[k];
+    if (av === null || av === undefined) av = -Infinity;
+    if (bv === null || bv === undefined) bv = -Infinity;
+    if (typeof av === 'string') return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+    return asc ? av - bv : bv - av;
+  });
+  const tbody = document.getElementById('scan-rows');
+  document.getElementById('scan-shown').textContent = list.length;
+  tbody.innerHTML = list.map(r => {
+    const isTop = _scanState.topSet.has(r.ticker);
+    const rowClass = 'border-b border-white/5' + (isTop ? ' bg-emerald-900/30' : '');
+    return `<tr class="${rowClass}">
+      <td class="text-xs text-slate-500">${r.rank}</td>
+      <td class="text-sm font-medium">${r.ticker || ''}${isTop ? ' <span class="pill pill-green" style="margin-left:4px">held</span>' : ''}</td>
+      <td class="text-right text-xs">${r.score === null ? '—' : r.score.toFixed(4)}</td>
+      <td class="text-right text-xs text-slate-400">${r.daily === null ? '—' : r.daily.toFixed(3)}</td>
+      <td class="text-right text-xs text-slate-400">${r.weekly === null ? '—' : r.weekly.toFixed(3)}</td>
+      <td class="text-right text-xs text-slate-400">${r.monthly === null ? '—' : r.monthly.toFixed(3)}</td>
+      <td class="text-right text-xs">${r.aligned ? '<span class="pill pill-green">yes</span>' : '<span class="pill pill-gray">no</span>'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="text-slate-500 text-xs py-3">No scan output yet. Run <code>bash scan_all.sh</code> to populate.</td></tr>';
 }
 
 function renderPicks(data) {
