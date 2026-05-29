@@ -1,0 +1,86 @@
+# Safe havens v1 — aggressive defense, faster bond rotation.
+# Sibling to defensive_v1 but tuned for sharper risk-off: shorter
+# absolute-momentum lookback (rotates to SHY earlier in a drawdown),
+# tighter RSI band (only the most stable cohort survives), and a heavier
+# volatility weight so the surviving picks are the calmest names in the
+# universe. Use with a small top-N (e.g. 10-15) — the goal is a
+# concentrated raft, not broad equity exposure.
+version: safe_havens_v1
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 50
+  sma_slow: 200
+  momentum_lookback: 126
+  momentum_skip_recent: 21
+  breakout_lookback: 252
+  volatility_lookback: 60          # shorter vol window — react faster
+
+  # Inherited knobs (engine compat).
+  atr_period: 14
+  atr_contraction_lookback: 20
+  atr_contraction_threshold: 0.30
+  vol_short_lookback: 20
+  vol_long_lookback: 60
+  vol_dryup_threshold: 0.80
+  bb_period: 20
+  bb_squeeze_lookback: 60
+  bb_squeeze_percentile: 0.20
+
+# Volatility even more dominant than defensive_v1. Trend kept as a
+# health-check so we don't load up on cheap-but-falling defensives.
+# Momentum at zero — in true risk-off, momentum is noise.
+timeframe_score_weights:
+  momentum: 0.00
+  trend: 0.25
+  rsi: 0.10
+  breakout: 0.00
+  volatility: 0.65                 # heaviest defensive tilt
+  atr_contraction: 0.00
+  volume_dryup: 0.00
+  bb_squeeze: 0.00
+
+# Narrower band than defensive_v1 — quality-of-cohort filter. Only names
+# in a calm, mid-range RSI survive; oversold (40s) and overbought (>60)
+# both get excluded.
+rsi_band: [48, 60]
+
+# Monthly heaviest — safe havens are a months-long allocation, not a swing.
+timeframe_weights:
+  daily: 0.05
+  weekly: 0.25
+  monthly: 0.70
+
+alignment_bonus: 0.05
+
+# Faster regime guard than defensive_v1: 63d / 10d skip. Rotates to SHY
+# at the first sign of SPY weakness instead of waiting for the 12M
+# signal to flip. Costs whipsaws in choppy markets, wins in fast crashes.
+absolute_momentum:
+  benchmark: SPY
+  bond_proxy: SHY
+  lookback: 63
+  skip_recent: 10
+  cash_fallback: SHY
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [20, 80]
+  sma_slow: [150, 300]
+  momentum_lookback: [60, 252]
+  momentum_skip_recent: [0, 42]
+  breakout_lookback: [120, 320]
+  volatility_lookback: [20, 120]
+  atr_period: [7, 28]
+  atr_contraction_lookback: [10, 60]
+  atr_contraction_threshold: [0.10, 0.50]
+  vol_short_lookback: [10, 40]
+  vol_long_lookback: [30, 120]
+  vol_dryup_threshold: [0.50, 0.95]
+  bb_period: [10, 30]
+  bb_squeeze_lookback: [30, 120]
+  bb_squeeze_percentile: [0.05, 0.40]
+  alignment_bonus: [0.0, 0.15]
+  rsi_band_low: [42, 52]
+  rsi_band_high: [55, 68]
