@@ -5,6 +5,7 @@ numbers; this code holds the math. Claude tunes the YAML, never this file.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -324,11 +325,95 @@ def precompute_indicators(daily: pd.DataFrame, f: Formula) -> dict:
         return out
 
     weekly = ind.resample_ohlcv(daily, "W")
+
+    # Monthly precompute: build the full-month resample once + month-to-date
+    # cumulatives so `score_ticker_at` can construct the "as of d0" monthly
+    # bucket in O(1) instead of resampling the daily slice on every call.
+    # 88k calls × ~0.5ms resample = ~44s wasted per backtest in the old path.
+    monthly_full = ind.resample_ohlcv(daily, "ME")
+    monthly_partial: dict[str, pd.Series] = {}
+    has_full_ohlc = {"open", "high", "low", "close"}.issubset(daily.columns)
+    if has_full_ohlc and len(daily) > 0:
+        gb = daily.groupby(daily.index.to_period("M"), sort=False)
+        monthly_partial["open"] = gb["open"].transform("first")
+        monthly_partial["high"] = gb["high"].cummax()
+        monthly_partial["low"] = gb["low"].cummin()
+        if "volume" in daily.columns:
+            monthly_partial["volume"] = gb["volume"].cumsum()
+
     return {
         "daily": _compute(daily),
         "weekly": _compute(weekly),
+        "monthly_full": monthly_full,
+        "monthly_partial": monthly_partial,
         "_daily_raw": daily,
     }
+
+
+def _build_monthly_at_d0(precomputed: dict, d0: pd.Timestamp) -> pd.DataFrame:
+    """O(1) construction of the monthly OHLCV "as of d0" from precomputed parts.
+
+    Replaces `ind.resample_ohlcv(daily.loc[:d0], 'ME')` — same result, no
+    per-d0 resample. Parity tested in scripts/parity_fast_monthly.py.
+    """
+    monthly_full = precomputed["monthly_full"]
+    monthly_partial = precomputed["monthly_partial"]
+    daily = precomputed["_daily_raw"]
+    if len(daily) == 0:
+        return monthly_full.iloc[:0]
+
+    daily_pos = _pos_at_daily(daily.index, d0)
+    if daily_pos < 0:
+        return monthly_full.iloc[:0]
+
+    # Position of the month-end label whose bucket contains d0's month.
+    # 'ME' labels are month-end timestamps; searchsorted(d0, 'left') returns the
+    # index of the first label >= d0, which is the month-end of d0's month.
+    month_idx = int(monthly_full.index.searchsorted(d0, side="left"))
+
+    # Case A: d0 falls exactly on a month-end already represented in monthly_full
+    # (rare — d0 must be a trading day equal to the resample label). Use the
+    # full bucket as-is; no partial construction needed.
+    if month_idx < len(monthly_full) and monthly_full.index[month_idx] == d0:
+        return monthly_full.iloc[: month_idx + 1]
+
+    # Case B: d0 is mid-month — synthesize the partial bucket from cumulatives.
+    if not monthly_partial:
+        # No OHLC; fall back to the per-d0 resample to preserve close-only paths.
+        return ind.resample_ohlcv(daily.loc[:d0], "ME")
+
+    last_daily_idx = daily.index[daily_pos]
+    partial_close = float(daily["close"].iloc[daily_pos])
+    partial_open = float(monthly_partial["open"].iloc[daily_pos])
+    partial_high = float(monthly_partial["high"].iloc[daily_pos])
+    partial_low = float(monthly_partial["low"].iloc[daily_pos])
+    cols: dict[str, list] = {
+        "open": [partial_open],
+        "high": [partial_high],
+        "low": [partial_low],
+        "close": [partial_close],
+    }
+    if "volume" in monthly_partial:
+        cols["volume"] = [float(monthly_partial["volume"].iloc[daily_pos])]
+
+    # Bucket label matches the 'ME' label of d0's month — same label the old path
+    # would produce when resampling daily.loc[:d0]. When monthly_full doesn't
+    # cover that month (d0 sits past the last sampled month-end), compute the
+    # month-end timestamp directly.
+    if month_idx < len(monthly_full):
+        label = monthly_full.index[month_idx]
+    else:
+        label = pd.Timestamp(last_daily_idx).to_period("M").to_timestamp(how="end").normalize()
+
+    partial_row = pd.DataFrame(cols, index=pd.DatetimeIndex([label]))
+    # Re-align columns to monthly_full when available so concat preserves order.
+    if len(monthly_full) > 0:
+        partial_row = partial_row.reindex(columns=monthly_full.columns)
+    complete = monthly_full.iloc[:month_idx]
+    out = pd.concat([complete, partial_row])
+    # Mirror the old path's `dropna(how="all")` — partial row always has data,
+    # so this is a no-op in practice, kept for byte-compatibility.
+    return out.dropna(how="all")
 
 
 _EMPTY_TF = {
@@ -517,7 +602,12 @@ def score_ticker_at(precomputed: dict, d0: pd.Timestamp, f: Formula) -> dict:
 
     daily_sub = _timeframe_score_at(daily_pre, d_pos, f)
     weekly_sub = _timeframe_score_at(weekly_pre, w_pos, f)
-    monthly_slice = ind.resample_ohlcv(daily_raw.loc[:d0], "ME")
+    # Fast monthly: O(1) from precomputed cumulatives. Set USE_LEGACY_MONTHLY=1
+    # to fall back to the per-d0 resample for debugging.
+    if os.environ.get("USE_LEGACY_MONTHLY", "0") == "1":
+        monthly_slice = ind.resample_ohlcv(daily_raw.loc[:d0], "ME")
+    else:
+        monthly_slice = _build_monthly_at_d0(precomputed, d0)
     monthly_sub = timeframe_score(monthly_slice, f)
 
     sub = {"daily": daily_sub, "weekly": weekly_sub, "monthly": monthly_sub}
