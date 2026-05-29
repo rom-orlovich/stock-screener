@@ -1205,6 +1205,10 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
   table.compact td, table.compact th { padding: 4px 8px; }
   .chart-box { position: relative; height: 280px; max-height: 280px; width: 100%; }
   .scroll-box { max-height: 360px; overflow-y: auto; }
+  .rules-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .rm-grid    { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  @media (max-width: 900px) { .rules-grid { grid-template-columns: 1fr; } .rm-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  @media (max-width: 540px) { .rm-grid { grid-template-columns: 1fr; } }
   .delta-up   { color: #5fe6a2; }
   .delta-down { color: #ff7a8a; }
   details > summary { cursor: pointer; list-style: none; }
@@ -1229,6 +1233,97 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
   </section>
 
   <section id="content" class="space-y-6 hidden">
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Trading rules — how this strategy actually trades</h2>
+          <p class="text-xs text-slate-500 mt-1">Reading the YAML &amp; <code>BacktestConfig</code> in plain English: when does it enter, when does it exit, what does it cost?</p>
+        </div>
+      </div>
+
+      <div class="rules-grid mt-4">
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Entry signal</div>
+          <div class="text-sm" id="tr-entry">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Holding period</div>
+          <div class="text-sm" id="tr-holding">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Stops &amp; exits <span class="text-slate-500 normal-case">(priority: stop → trail → tp → time)</span></div>
+          <table class="w-full text-xs mt-1"><tbody id="tr-stops"></tbody></table>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Costs assumed · Benchmark</div>
+          <div class="text-sm" id="tr-costs">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Risk metrics — from every trade in the latest backtest</h2>
+          <p class="text-xs text-slate-500 mt-1">The questions traders care about: do wins outpace losses, how brutal is the worst streak, what's the realistic expectancy per trade?</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">based on <span id="rm-ntrades">0</span> trades</div>
+      </div>
+
+      <div class="card p-4 mt-4" id="wl-card" style="background:#0f1626">
+        <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Win / Loss ratio (avg win ÷ |avg loss|)</div>
+        <div class="flex items-baseline gap-3 flex-wrap">
+          <div class="text-3xl font-bold num" id="rm-wl-ratio">—</div>
+          <div class="text-sm text-slate-400">
+            <span id="rm-wl-pill" class="pill pill-gray">—</span>
+            <span class="text-slate-500 ml-2">avg win <span id="rm-avg-win" class="text-emerald-400 num">—</span>  ·  avg loss <span id="rm-avg-loss" class="text-rose-400 num">—</span></span>
+          </div>
+        </div>
+        <div class="text-xs text-slate-500 mt-2">Rule of thumb: &gt; 1.5 is healthy, 1.0–1.5 is mediocre, &lt; 1.0 means the strategy needs a high win-rate to break even.</div>
+      </div>
+
+      <div class="rm-grid mt-4">
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Win rate</div>
+          <div class="text-lg num" id="rm-winrate">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Profit factor <span class="text-slate-500">(Σ wins / |Σ losses|)</span></div>
+          <div class="text-lg num" id="rm-pf">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Expectancy / trade</div>
+          <div class="text-lg num" id="rm-exp">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Trade σ (ret std)</div>
+          <div class="text-lg num" id="rm-std">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Best trade</div>
+          <div class="text-lg num text-emerald-400" id="rm-best">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Worst trade</div>
+          <div class="text-lg num text-rose-400" id="rm-worst">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Max consecutive losses</div>
+          <div class="text-lg num text-rose-400" id="rm-maxloss">—</div>
+          <div class="text-xs text-slate-500">drawdown-protection signal</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Max consecutive wins</div>
+          <div class="text-lg num text-emerald-400" id="rm-maxwin">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Skew / Kurtosis</div>
+          <div class="text-sm num" id="rm-skew">—</div>
+          <div class="text-xs text-slate-500">positive skew = fat right tail</div>
+        </div>
+      </div>
+    </div>
 
     <div class="card p-5">
       <div class="flex items-baseline justify-between flex-wrap gap-3">
@@ -1437,6 +1532,8 @@ async function load() {
     + `${(data.scan_rows||[]).length} tickers in latest scan · ${(data.change_log||[]).length} accepted param changes · `
     + `${(data.trials||[]).length} auto-tune trials · baseline month ${baseline.month || '—'} (avg composite ${fmtNum(baseline.composite_avg, 3)})`;
   document.getElementById('content').classList.remove('hidden');
+  renderTradingRules(data);
+  renderRiskMetrics(data);
   renderTimeline(data);
   renderScan(data);
   renderTickerJourney(data);
@@ -1444,6 +1541,77 @@ async function load() {
   renderChangelog(data);
   renderDiffs(data);
   renderTrials(data);
+}
+
+function renderTradingRules(data) {
+  const tr = data.trading_rules || {};
+  const stops = tr.stops || {};
+  const $ = id => document.getElementById(id);
+  $('tr-entry').textContent   = tr.entry_signal   || '—';
+  $('tr-holding').textContent = tr.holding_period || '—';
+
+  const stopLabels = {
+    atr_stop:        'ATR stop',
+    hard_stop_loss:  'Hard stop-loss',
+    trailing_stop:   'Trailing stop',
+    time_stop:       'Time stop',
+    take_profit:     'Take profit',
+  };
+  const order = ['hard_stop_loss', 'atr_stop', 'trailing_stop', 'take_profit', 'time_stop'];
+  $('tr-stops').innerHTML = order.map(k => {
+    const v = stops[k] || 'disabled';
+    const muted = (v === 'disabled');
+    return `<tr class="border-b border-white/5">
+      <td class="text-slate-400 py-1 pr-2">${stopLabels[k]}</td>
+      <td class="py-1 ${muted ? 'text-slate-500' : 'text-slate-200'}">${v}</td>
+    </tr>`;
+  }).join('');
+
+  const bps = tr.cost_per_rebalance_bps;
+  const bench = tr.benchmark || 'SPY';
+  $('tr-costs').innerHTML =
+    `<div><span class="text-slate-400">Cost:</span> <span class="num">${bps == null ? '—' : bps}</span> bps per rebalance`
+    + ` <span class="text-slate-500">(${bps != null ? (bps / 100).toFixed(3) : '—'}% round-trip — covers spread + commission)</span></div>`
+    + `<div class="mt-2"><span class="text-slate-400">Benchmark:</span> <span class="num">${bench}</span></div>`;
+}
+
+function renderRiskMetrics(data) {
+  const m = data.risk_metrics || {};
+  const $ = id => document.getElementById(id);
+  const n = m.n_trades || 0;
+  $('rm-ntrades').textContent = n;
+
+  if (!n) {
+    ['rm-wl-ratio','rm-avg-win','rm-avg-loss','rm-winrate','rm-pf','rm-exp','rm-std','rm-best','rm-worst','rm-maxloss','rm-maxwin','rm-skew']
+      .forEach(id => $(id).textContent = '—');
+    $('rm-wl-pill').textContent = 'no trades';
+    $('rm-wl-pill').className = 'pill pill-gray';
+    return;
+  }
+
+  const aw = Number(m.avg_win_pct || 0);
+  const al = Number(m.avg_loss_pct || 0);
+  const wl = (al !== 0) ? (aw / Math.abs(al)) : null;
+  $('rm-wl-ratio').textContent = (wl == null) ? '—' : `${wl.toFixed(2)} : 1`;
+  $('rm-avg-win').textContent  = `+${aw.toFixed(2)}%`;
+  $('rm-avg-loss').textContent = `${al.toFixed(2)}%`;
+
+  const pill = $('rm-wl-pill');
+  if (wl == null) { pill.textContent = 'n/a'; pill.className = 'pill pill-gray'; }
+  else if (wl >= 1.5) { pill.textContent = 'healthy'; pill.className = 'pill pill-green'; }
+  else if (wl >= 1.0) { pill.textContent = 'mediocre'; pill.className = 'pill pill-amber'; }
+  else                { pill.textContent = 'weak';     pill.className = 'pill pill-red'; }
+
+  const winPct = (Number(m.win_rate || 0) * 100).toFixed(1) + '%';
+  $('rm-winrate').textContent = winPct;
+  $('rm-pf').textContent      = (m.profit_factor == null || !isFinite(m.profit_factor)) ? '∞' : Number(m.profit_factor).toFixed(2);
+  $('rm-exp').textContent     = `${Number(m.expectancy_pct || 0).toFixed(3)}%`;
+  $('rm-std').textContent     = `${Number(m.ret_std_pct || 0).toFixed(2)}%`;
+  $('rm-best').textContent    = `+${Number(m.best_trade_pct || 0).toFixed(1)}%`;
+  $('rm-worst').textContent   = `${Number(m.worst_trade_pct || 0).toFixed(1)}%`;
+  $('rm-maxloss').textContent = m.max_consecutive_losses ?? '—';
+  $('rm-maxwin').textContent  = m.max_consecutive_wins ?? '—';
+  $('rm-skew').textContent    = `skew ${Number(m.skew || 0).toFixed(2)} · kurt ${Number(m.kurt || 0).toFixed(2)}`;
 }
 
 let _scanState = { rows: [], topSet: new Set(), sortKey: 'rank', sortAsc: true, filter: '' };
