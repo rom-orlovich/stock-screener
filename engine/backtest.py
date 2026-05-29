@@ -24,6 +24,59 @@ from . import atr as atr_mod
 from .score import Formula, precompute_indicators, score_ticker, score_ticker_at
 
 
+# ---------------------------------------------------------------------------
+# Numba JIT exit loop (opt-in via USE_NUMBA_EXITS=1).
+# Hot inner loop iterating ~5 daily bars per pick — 88k+ calls per backtest.
+# Pure-arithmetic loop: ideal for JIT. Parity is bit-exact vs the Python loop.
+# Import is lazy so the module still loads when numba isn't installed.
+# ---------------------------------------------------------------------------
+_EXIT_CODES = ("stop", "trail", "tp", "time", "hold")
+_jit_exit_loop = None
+
+
+def _load_jit():
+    global _jit_exit_loop
+    if _jit_exit_loop is not None:
+        return _jit_exit_loop
+    try:
+        import numba  # noqa: F401
+    except ImportError:
+        return None
+
+    @numba.njit(cache=True)
+    def _impl(prices, entry, has_stop, stop_lvl, has_tp, tp_lvl,
+              trail_stop_pct, trail_arm_lvl, time_stop_bars):
+        n = prices.shape[0]
+        if n == 0:
+            return np.nan, 4
+        peak = entry
+        trail_armed = False
+        has_trail = False
+        trail_lvl = 0.0
+        for i in range(n):
+            px = prices[i]
+            if trail_stop_pct > 0.0:
+                if px > peak:
+                    peak = px
+                if not trail_armed and px >= trail_arm_lvl:
+                    trail_armed = True
+                if trail_armed:
+                    trail_lvl = peak * (1.0 - trail_stop_pct)
+                    has_trail = True
+            if has_stop and px <= stop_lvl:
+                return px / entry - 1.0, 0
+            if has_trail and px <= trail_lvl:
+                return px / entry - 1.0, 1
+            if has_tp and px >= tp_lvl:
+                return px / entry - 1.0, 2
+            if time_stop_bars > 0 and (i + 1) >= time_stop_bars:
+                return px / entry - 1.0, 3
+        return prices[n - 1] / entry - 1.0, 4
+
+    _jit_exit_loop = _impl
+    return _impl
+
+
 @dataclass
 class BacktestConfig:
     top_n: int = 10
@@ -100,6 +153,23 @@ def _period_return_with_exits(df: pd.DataFrame, d0: pd.Timestamp, d1: pd.Timesta
     window = s.loc[(s.index > d0) & (s.index <= d1)]
     if window.empty:
         return np.nan, "hold"
+
+    # JIT fast path — same priority order + arithmetic as the Python loop below.
+    if os.environ.get("USE_NUMBA_EXITS", "0") == "1":
+        jit = _load_jit()
+        if jit is not None:
+            ret, code = jit(
+                window.to_numpy(dtype=np.float64),
+                float(entry),
+                bool(stop_lvl is not None),
+                float(stop_lvl) if stop_lvl is not None else 0.0,
+                bool(tp_lvl is not None),
+                float(tp_lvl) if tp_lvl is not None else 0.0,
+                float(cfg.trailing_stop_pct),
+                float(trail_arm_lvl) if trail_arm_lvl is not None else 0.0,
+                int(cfg.time_stop_bars),
+            )
+            return float(ret), _EXIT_CODES[code]
 
     peak = entry
     trail_armed = False
