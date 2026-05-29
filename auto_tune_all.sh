@@ -4,6 +4,12 @@
 set -u
 cd "$(dirname "$0")"
 mkdir -p runs
+
+# Portable python resolver: prefer a project-local venv if present, else fall
+# back to whatever the shell finds. Hosts that need a different interpreter
+# (e.g. PEP 668 systems running from a venv) just create ./.venv and we use it
+# automatically — no per-host edits to this script.
+PY="${PYTHON:-$([ -x ./.venv/bin/python ] && echo ./.venv/bin/python || command -v python3 || command -v python)}"
 LOG="runs/auto_tune_nightly_$(date +%Y%m%d).log"
 : > "$LOG"
 # Window end = yesterday (full closing bar). Start stays at 2023-01-01 so the
@@ -16,10 +22,10 @@ for f in formulas/*.yaml; do
   esac
   echo "" >> "$LOG"
   echo "--- $f ---" >> "$LOG"
-  python auto_tune.py --formula "$f" --start 2023-01-01 --end "$END_DATE" --universe sp500 --trials 3 >> "$LOG" 2>&1 || echo "FAILED on $f" >> "$LOG"
+  "$PY" auto_tune.py --formula "$f" --start 2023-01-01 --end "$END_DATE" --universe sp500 --trials 3 >> "$LOG" 2>&1 || echo "FAILED on $f" >> "$LOG"
 done
 echo "" >> "$LOG"
 echo "--- regenerating dashboard ---" >> "$LOG"
-python dashboard.py >> "$LOG" 2>&1 || echo "dashboard FAILED" >> "$LOG"
+"$PY" dashboard.py >> "$LOG" 2>&1 || echo "dashboard FAILED" >> "$LOG"
 echo "" >> "$LOG"
 echo "=== done @ $(date -Iseconds) ===" >> "$LOG"
