@@ -14,7 +14,9 @@ dict via bt.run(start=..., end=...).
 """
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -104,7 +106,67 @@ def classify_current_regime(data: dict[str, pd.DataFrame]) -> dict:
     }
 
 
+def _run_job(payload):
+    """Worker entry point: re-loads data from the warm pickle cache, runs ONE
+    (formula, regime) backtest, returns (formula_name, regime_name, stats_or_err).
+
+    Workers inherit the parent's environment under spawn, so
+    USE_VECTORIZED_SCORING propagates without extra plumbing.
+    """
+    fp_str, regime, tickers, fetch_start, widest_end = payload
+    fp = Path(fp_str)
+    raw = yaml.safe_load(fp.read_text())
+    f = Formula(raw=raw)
+    cfg = cfg_for(raw)
+    # Warm pickle cache: this is fast (no network).
+    data = get_universe(tickers, start=fetch_start, end=widest_end, provider="yf")
+    try:
+        res = bt.run(data, f, start=regime["start"], end=regime["end"], cfg=cfg)
+        stats = res.stats
+        return fp.stem, regime["name"], {
+            "regime_label": regime["label"],
+            "kind": regime["kind"],
+            "start": regime["start"],
+            "end": regime["end"],
+            "total_return": stats.get("total_return"),
+            "sharpe": stats.get("sharpe"),
+            "max_drawdown": stats.get("max_drawdown"),
+            "win_rate": stats.get("win_rate"),
+            "n_trades": stats.get("n_trades"),
+            "benchmark_total_return": stats.get("benchmark_total_return"),
+            "alpha_vs_benchmark": stats.get("alpha_vs_benchmark"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return fp.stem, regime["name"], {"error": str(exc)}
+
+
+def _flush_matrix(matrix: dict, regimes: list[dict], current: dict) -> None:
+    """Atomic incremental save so a kill mid-run never loses the partial grid."""
+    payload = {
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "regimes": regimes,
+        "matrix": matrix,
+        "current": current,
+    }
+    target = RUNS / "regime_matrix.json"
+    tmp = target.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(payload, indent=2, default=str, sort_keys=True))
+    tmp.replace(target)
+
+
 def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--parallel", type=int, default=1,
+                   help="Number of (formula, regime) jobs to run concurrently "
+                        "via spawn pool. 0 = auto (cpu_count // 2). 1 = sequential.")
+    p.add_argument("--vectorized", action="store_true",
+                   help="Set USE_VECTORIZED_SCORING=1 for this run (and inherited by workers).")
+    args = p.parse_args()
+    if args.vectorized:
+        os.environ["USE_VECTORIZED_SCORING"] = "1"
+    if args.parallel == 0:
+        args.parallel = max(1, (os.cpu_count() or 2) // 2)
+
     RUNS.mkdir(exist_ok=True)
     regimes = load_regimes()
     if not regimes:
@@ -129,45 +191,45 @@ def main():
     # Build matrix: formula x regime x stats
     matrix: dict[str, dict] = {}
     formulas = sorted(p for p in FORMULAS.glob("*.yaml") if ".bak_" not in p.name)
-    print(f"\nrunning {len(formulas)} formulas x {len(regimes)} regimes = {len(formulas) * len(regimes)} backtests")
-
+    n_jobs = len(formulas) * len(regimes)
+    print(f"\nrunning {len(formulas)} formulas x {len(regimes)} regimes = {n_jobs} backtests"
+          f"   parallel={args.parallel}   vectorized={os.environ.get('USE_VECTORIZED_SCORING', '0') == '1'}",
+          flush=True)
     for fp in formulas:
-        raw = yaml.safe_load(fp.read_text())
-        name = fp.stem
-        f = Formula(raw=raw)
-        cfg = cfg_for(raw)
-        matrix[name] = {}
-        for r in regimes:
-            try:
-                res = bt.run(data, f, start=r["start"], end=r["end"], cfg=cfg)
-                stats = res.stats
-                matrix[name][r["name"]] = {
-                    "regime_label": r["label"],
-                    "kind": r["kind"],
-                    "start": r["start"],
-                    "end": r["end"],
-                    "total_return": stats.get("total_return"),
-                    "sharpe": stats.get("sharpe"),
-                    "max_drawdown": stats.get("max_drawdown"),
-                    "win_rate": stats.get("win_rate"),
-                    "n_trades": stats.get("n_trades"),
-                    "benchmark_total_return": stats.get("benchmark_total_return"),
-                    "alpha_vs_benchmark": stats.get("alpha_vs_benchmark"),
-                }
-                sh = stats.get("sharpe")
-                ret = stats.get("total_return")
-                print(f"  {name:35s} {r['name']:15s}  sharpe={sh}  return={ret}", flush=True)
-            except Exception as exc:  # noqa: BLE001
-                matrix[name][r["name"]] = {"error": str(exc)}
-                print(f"  {name:35s} {r['name']:15s}  ERROR {exc}", flush=True)
+        matrix[fp.stem] = {}
 
-    payload = {
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "regimes": regimes,
-        "matrix": matrix,
-        "current": current,
-    }
-    (RUNS / "regime_matrix.json").write_text(json.dumps(payload, indent=2, default=str))
+    if args.parallel == 1:
+        # Sequential — preserves the original code path exactly. Useful for
+        # debugging and for environments where multiprocessing.spawn is flaky.
+        for fp in formulas:
+            for r in regimes:
+                name, rname, result = _run_job((str(fp), r, tickers, fetch_start, widest_end))
+                matrix[name][rname] = result
+                sh = result.get("sharpe") if "error" not in result else "ERR"
+                ret = result.get("total_return") if "error" not in result else result["error"]
+                print(f"  {name:35s} {rname:15s}  sharpe={sh}  return={ret}", flush=True)
+                _flush_matrix(matrix, regimes, current)
+    else:
+        # spawn pool — each worker re-loads data from the warm pickle cache.
+        # imap_unordered streams results as soon as each job finishes; we
+        # update the matrix and flush to disk every result so a kill loses at
+        # most one in-flight backtest.
+        from multiprocessing import get_context
+        jobs = [(str(fp), r, tickers, fetch_start, widest_end)
+                for fp in formulas for r in regimes]
+        ctx = get_context("spawn")
+        done = 0
+        with ctx.Pool(args.parallel) as pool:
+            for name, rname, result in pool.imap_unordered(_run_job, jobs):
+                matrix[name][rname] = result
+                done += 1
+                sh = result.get("sharpe") if "error" not in result else "ERR"
+                ret = result.get("total_return") if "error" not in result else result["error"]
+                print(f"  [{done:>3}/{n_jobs}] {name:35s} {rname:15s}  sharpe={sh}  return={ret}",
+                      flush=True)
+                _flush_matrix(matrix, regimes, current)
+
+    _flush_matrix(matrix, regimes, current)
     print(f"\nwrote {RUNS/'regime_matrix.json'} and {RUNS/'regime_current.json'}")
 
 
