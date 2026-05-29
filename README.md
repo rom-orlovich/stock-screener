@@ -162,6 +162,36 @@ tmux new -d -s stock-regime-watcher -c $PWD 'exec ./scripts/chain_regime_after_u
 
 ---
 
+## Stock advisor skill
+
+`stock-advisor` is a Claude Code **skill** (not a CLI) that turns this
+repo's output into an actionable weekly trade plan. It lives at
+`~/.claude/skills/stock-advisor/SKILL.md` (user-global, not in this
+repo).
+
+What it does, in one Claude Code session:
+
+1. Reads `runs/regime_current.json` (regenerates via `run_regimes.py`
+   if older than 24h) → current SPY regime.
+2. Picks the best strategy for that regime, filtered by
+   `analysis.json` predictiveness (`corr_pearson > 0.05`,
+   `trustworthiness_flags == []`).
+3. Reads the latest `scan_<strategy>_sp500_*.csv` (triggers
+   `scan_all.sh` if stale).
+4. `WebSearch` news + sentiment for the top 5–10 tickers.
+5. Cross-strategy consensus tiering across every trustworthy scan.
+6. Outputs a phone-friendly plan: market view, top picks with sentiment
+   and consensus tiers, entry/stops, and caveats.
+
+Trigger from any Claude Code session by asking naturally
+("what should I buy this week?", "today's picks", "market view +
+top 10", "what about NVDA?") or explicitly with `/skill stock-advisor`.
+
+A thin info wrapper lives at `scripts/quick_advisor.sh` — it just prints
+how to invoke the skill.
+
+---
+
 ## Live dashboard
 
 `dashboard.py` regenerates `docs/index.html`, `docs/data.json`,
