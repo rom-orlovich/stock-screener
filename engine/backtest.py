@@ -22,6 +22,7 @@ import pandas as pd
 
 from . import atr as atr_mod
 from .score import Formula, precompute_indicators, score_ticker, score_ticker_at
+from .score_vec import precompute_universe, score_universe_at
 
 
 # ---------------------------------------------------------------------------
@@ -276,8 +277,14 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
     # the per-d0 partial resample because Sat/Sun have no trading).
     use_vec = (os.environ.get("USE_VECTORIZED_SCORING", "0") == "1"
                and cfg.rebalance.endswith("FRI"))
+    use_xs = (os.environ.get("USE_CROSS_SECTION", "0") == "1"
+              and cfg.rebalance.endswith("FRI"))
     precomputed: dict[str, dict | None] = {}
-    if use_vec:
+    universe_pre: dict | None = None
+    if use_xs:
+        # Cross-section vectorization subsumes the per-ticker precompute.
+        universe_pre = precompute_universe(price_data, f)
+    elif use_vec:
         for tkr, df in price_data.items():
             try:
                 precomputed[tkr] = precompute_indicators(df, f)
@@ -305,20 +312,31 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
 
         # Score every ticker using data only up to d0 (no lookahead).
         ranked = []
-        for tkr, df in price_data.items():
-            hist = df.loc[:d0]
-            if len(hist) < 60:
-                continue
-            try:
-                pre = precomputed.get(tkr) if use_vec else None
-                if pre is not None:
-                    sc = score_ticker_at(pre, d0, f)["score"]
-                else:
-                    sc = score_ticker(hist, f)["score"]
-            except Exception:  # noqa: BLE001
-                continue
-            if sc >= cfg.min_score:
-                ranked.append((tkr, sc))
+        if use_xs and universe_pre is not None:
+            # One batched call returns {ticker: score} for the whole universe.
+            xs_scores = score_universe_at(universe_pre, d0, f)
+            for tkr, df in price_data.items():
+                hist = df.loc[:d0]
+                if len(hist) < 60:
+                    continue
+                sc = xs_scores.get(tkr, 0.0)
+                if sc >= cfg.min_score:
+                    ranked.append((tkr, sc))
+        else:
+            for tkr, df in price_data.items():
+                hist = df.loc[:d0]
+                if len(hist) < 60:
+                    continue
+                try:
+                    pre = precomputed.get(tkr) if use_vec else None
+                    if pre is not None:
+                        sc = score_ticker_at(pre, d0, f)["score"]
+                    else:
+                        sc = score_ticker(hist, f)["score"]
+                except Exception:  # noqa: BLE001
+                    continue
+                if sc >= cfg.min_score:
+                    ranked.append((tkr, sc))
         ranked.sort(key=lambda x: x[1], reverse=True)
         picks = ranked[: cfg.top_n]
 
