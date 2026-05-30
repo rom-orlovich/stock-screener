@@ -222,3 +222,25 @@ Numbers are directional (no profiler run yet); the **invariance column is the ha
 - **Spec coverage:** Levers 1–5 each map to a phase (1→P1, 2→P2, 3→P3, 4→P4, 5→P5). Regression protocol → §3, enforced in every phase's parity step. ✔
 - **Placeholders:** `build_bank` body is sketched, not full — flagged as the implementer's task with exact inputs/outputs and the parity test that pins its behavior (Phase 2 Step 1). No "TODO/handle edge cases" left in the gates. ✔
 - **Consistency:** flag names (`USE_SHARED_BANK`, `USE_CROSS_SECTION`, `USE_NUMBA_EXITS`, `USE_VECTORIZED_SCORING`), function names (`collect_specs`, `build_bank`, `assemble_precompute`), and the golden-diff gate are used identically across §2 and §4. ✔
+
+---
+
+## 8. MEASURED FINDINGS (post-implementation — corrects §2 estimates)
+
+`scripts/profile_split.py` on WSL (momentum_v1, 61 tickers, recent_2025 window) breaks runtime down — and it **overturns two of the spec's own estimates**:
+
+```
+per-d0 scoring (vectorized) : 64.56s   95.5% of total
+precompute (per-formula)    :  3.07s    4.5% of total
+bank build (shared, once)   :  3.10s   amortized across ALL 12 formulas
+```
+
+1. **Lever 2 (bank) is ~7%, not ~2x.** The "65-75%" was 65-75% of *precompute*, but precompute is only 4.5% of a backtest. Across 72 jobs the bank is built once (3.1s) vs precompute running 72x (~221s) -> saves ~7% of wall time. Still cheap + bit-identical -> keep it, just not a headline.
+
+2. **Lever 3 (cross-section daily) is effectively worthless -> DROPPED.** The 95.5% is weekly+monthly per-d0 recompute (cap fallback at score.py:444-462, fires on ~every weekly call for sma_slow~200, plus monthly always recomputes). The daily timeframe a daily cross-section would speed up is already O(1). Building it adds the FP-tie/alignment regression surface for ~0 gain. Not built — data-backed call.
+
+3. **Lever 1 (fork + parallel) is the dominant win.** Parallelism divides the whole 95.5% by worker count; fork makes 4->10 workers RAM-safe on WSL. The real 4h->~1.6h move.
+
+4. **Real next lever = the weekly/monthly recompute** — make capped-window indicators O(1) per d0 via prefix sums instead of re-deriving timeframe_score(slice) each bar. Targets the true 95.5%; high parity risk (cap window is n_avail-dependent, per-(ticker,date)); a separate carefully-gated effort. ~2-3x lives here.
+
+**Net delivered:** fork (P1) + bank (P2) + flag-wiring (P4), parity-proven byte-identical. P3 dropped on evidence. Weekly/monthly O(1) rewrite + Phase 5 (universe scaling) are the documented next steps.
