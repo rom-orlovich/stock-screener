@@ -311,14 +311,17 @@ def _daily_score_vectorized(
             else:
                 bbsq_s[j] = _clip01((1.0 - rank) / max(1.0 - bb_pct, 1e-6))
 
-    total = (w.get("momentum", 0.0) * np.round(mom_s, 4)
-             + w.get("trend", 0.0) * np.round(trend_s, 4)
-             + w.get("rsi", 0.0) * np.round(rsi_s, 4)
-             + w.get("breakout", 0.0) * np.round(brk_s, 4)
-             + w.get("volatility", 0.0) * np.round(vol_s, 4)
-             + w.get("atr_contraction", 0.0) * np.round(atr_s, 4)
-             + w.get("volume_dryup", 0.0) * np.round(vdry_s, 4)
-             + w.get("bb_squeeze", 0.0) * np.round(bbsq_s, 4))
+    # Match the per-ticker path: weighted sum of UNROUNDED sub-scores, then
+    # round only the total. Pre-rounding each sub-score before summing would
+    # introduce ~5e-5 drift per term — caught by parity_cross_section.py.
+    total = (w.get("momentum", 0.0) * mom_s
+             + w.get("trend", 0.0) * trend_s
+             + w.get("rsi", 0.0) * rsi_s
+             + w.get("breakout", 0.0) * brk_s
+             + w.get("volatility", 0.0) * vol_s
+             + w.get("atr_contraction", 0.0) * atr_s
+             + w.get("volume_dryup", 0.0) * vdry_s
+             + w.get("bb_squeeze", 0.0) * bbsq_s)
 
     return np.round(total, 4), uptrend
 
