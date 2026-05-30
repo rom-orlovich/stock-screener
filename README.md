@@ -102,6 +102,29 @@ with `exit: "regime_off"`.
 strategy mixes `trail` + `tp` + `hold`; if 95% is `hold` your exits are
 inactive.
 
+### Entry modes — `rebalance` (default) vs `event`
+
+`BacktestConfig.mode` gates how each weekly scan picks names:
+
+- **`rebalance`** (default, unchanged) — take the top-N ranked names every
+  `W-FRI` bar. Bit-identical to the legacy path.
+- **`event`** — a volume-confirmed breakout filter on top of the ranking. A
+  name only qualifies when, on (or within `event_window_bars` of) the scan bar,
+  `close > prior-event_lookback-bar high` **AND**
+  `volume >= vol_confirm_mult * volume.rolling(event_vol_lookback).mean()`.
+  Cadence stays weekly `W-FRI` (no daily scan — preserves the `n_per_year=52`
+  annualization, per-rebalance cost and the weekly-resample parity). Pair with a
+  tight ATR stop + trailing + time stop to get the asymmetric R:R a real
+  breakout system needs. Fully causal — `rolling_high` excludes the current bar,
+  the volume mean is backward-looking.
+
+Carry mode + event params + exits in the formula YAML under a `backtest:` block
+(`engine.backtest.config_from_formula` reads it; `run.py --mode` and
+`run_regimes.py` honor it). Only the two breakout YAMLs set `mode: event`.
+Validate with `scripts/validate_event_path.py` (3-way ablation:
+`rebalance_nostop` / `rebalance_stop` / `event_stop`, full window + regimes,
+reports W/L asymmetry). Unit tests: `scripts/test_event_path.py`.
+
 ---
 
 ## Auto-tuner (`auto_tune.py`) — over-fit guardrails

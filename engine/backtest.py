@@ -14,6 +14,7 @@ Exit logic (priority order, evaluated on each daily close inside the period):
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 
@@ -103,6 +104,18 @@ class BacktestConfig:
     time_stop_bars: int = 0
 
     benchmark_ticker: str = "SPY"  # buy-and-hold ref over the same window.
+
+    # Event-entry mode. "rebalance" (default) is the legacy path and MUST stay
+    # bit-identical. "event" filters each weekly scan's ranked names down to those
+    # with a volume-confirmed breakout on (or just before) d0 — see
+    # `_breakout_event_fired`. Cadence stays the existing W-FRI rebalance bar
+    # (decision Q1: no daily scan — preserves n_per_year=52, per-rebalance cost,
+    # and the weekly-resample parity). Pair with stops for the asymmetric R:R.
+    mode: str = "rebalance"
+    vol_confirm_mult: float = 1.5        # today's volume >= k * avg_vol_long (Q2: fixed)
+    event_lookback: int = 0              # prior-N-bar high; 0 -> formula breakout_lookback
+    event_vol_lookback: int = 60         # avg-volume window for the confirmation
+    event_window_bars: int = 1           # fired on any of the trailing N bars <= d0
 
 
 @dataclass
@@ -262,6 +275,58 @@ def _market_regime_ok(price_data: dict[str, pd.DataFrame], abs_cfg: dict, d0: pd
     return b_ret > 0.0
 
 
+def _breakout_event_fired(df: pd.DataFrame, d0: pd.Timestamp, lookback: int,
+                          vol_mult: float, vol_lookback: int,
+                          window_bars: int) -> bool:
+    """True if a volume-confirmed breakout fired on any of the trailing
+    `window_bars` daily bars ending at d0.
+
+    Definition (fully causal — no lookahead):
+      break    : close > prior-`lookback`-bar high   (high.shift(1).rolling(lb).max(),
+                 the current bar excluded — same semantics as engine.indicators.rolling_high)
+      confirm  : volume >= vol_mult * volume.rolling(vol_lookback).mean()
+                 (today's volume is known at the close; the rolling mean is backward-looking)
+
+    Only used when cfg.mode == "event"; the default path never calls this.
+    """
+    if "volume" not in df.columns:
+        return False
+    hist = df.loc[:d0]
+    need = max(int(lookback), int(vol_lookback)) + 1
+    if len(hist) < need:
+        return False
+    close = hist["close"]
+    high = hist["high"] if "high" in hist.columns else close
+    vol = hist["volume"]
+    roll_hi = high.shift(1).rolling(window=int(lookback), min_periods=int(lookback)).max()
+    avg_vol = vol.rolling(window=int(vol_lookback), min_periods=int(vol_lookback)).mean()
+    # NaN comparisons (warmup bars) evaluate False — exactly what we want.
+    broke = close.to_numpy() > roll_hi.to_numpy()
+    confirmed = vol.to_numpy() >= (float(vol_mult) * avg_vol.to_numpy())
+    fired = broke & confirmed
+    if fired.size == 0:
+        return False
+    w = max(1, int(window_bars))
+    return bool(fired[-w:].any())
+
+
+def config_from_formula(f: Formula, **overrides) -> BacktestConfig:
+    """Build a BacktestConfig from an optional `backtest:` block in the formula
+    YAML, with explicit (non-None) keyword overrides taking precedence.
+
+    Keys not matching a BacktestConfig field are ignored. This is how the two
+    breakout formulas carry their event-mode + exit settings without hardcoding
+    them in run.py / run_regimes.py.
+    """
+    blk = dict(f.raw.get("backtest") or {})
+    valid = {fld.name for fld in dataclasses.fields(BacktestConfig)}
+    kwargs = {k: v for k, v in blk.items() if k in valid}
+    for k, v in overrides.items():
+        if v is not None:
+            kwargs[k] = v
+    return BacktestConfig(**kwargs)
+
+
 def run(price_data: dict[str, pd.DataFrame], f: Formula,
         start: str, end: str, cfg: BacktestConfig | None = None,
         bank: dict | None = None) -> BacktestResult:
@@ -351,7 +416,21 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
                 if sc >= cfg.min_score:
                     ranked.append((tkr, sc))
         ranked.sort(key=lambda x: x[1], reverse=True)
-        picks = ranked[: cfg.top_n]
+        if cfg.mode == "event":
+            # Keep only ranked names with a volume-confirmed breakout on/just
+            # before d0. Walk the sorted list and stop once top_n slots fill —
+            # so we test only as many names as needed (cheap), and event-fired
+            # names fill the book rather than leaving it short.
+            lb = int(cfg.event_lookback) or int(f.raw.get("indicators", {}).get("breakout_lookback", 30))
+            picks = []
+            for tkr, sc in ranked:
+                if _breakout_event_fired(price_data[tkr], d0, lb, cfg.vol_confirm_mult,
+                                         cfg.event_vol_lookback, cfg.event_window_bars):
+                    picks.append((tkr, sc))
+                    if len(picks) >= cfg.top_n:
+                        break
+        else:
+            picks = ranked[: cfg.top_n]
 
         if not picks:
             equity.append(equity[-1])

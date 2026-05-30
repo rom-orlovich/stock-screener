@@ -37,6 +37,10 @@ run.py ──► engine.backtest.run() ──► engine.score.score_ticker()
                 │   (only when YAML has         + timeframe sub-scores
                 │    absolute_momentum block)
                 │
+                ├── _breakout_event_fired()
+                │   (only when cfg.mode=="event": filters ranked
+                │    picks to volume-confirmed breaks; W-FRI cadence)
+                │
                 └── _period_return_with_exits()
                     (stop / trail / tp / time / hold)
 
@@ -69,6 +73,23 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-05-31** — feat: event-entry path. `BacktestConfig.mode`
+  (`rebalance` default / `event`), `_breakout_event_fired` (causal,
+  vectorized: `close > prior-N high` AND `volume >= k*avg`, trailing
+  `event_window_bars`, W-FRI cadence per Q1), `config_from_formula` reading a
+  YAML `backtest:` block. Wired into `run.py --mode` + `run_regimes.cfg_for`;
+  `mode: event` set only in the two breakout YAMLs. Default path bit-identical
+  (`scripts/test_event_path.py` golden). **Validation verdict (HONEST,
+  `scripts/validate_event_path.py`, full sp500 + 6 regimes): it does NOT make
+  these real breakout systems.** Payoff ratio stays ~1.0–1.1 in every mode,
+  max-DD generally *worsens* (filter shrinks the book → concentration), and
+  exits are ~89% `hold` / 0% `time` because the weekly rebalance caps each trade
+  at ~5 bars so stops/trails can't manage the trade. The `rebalance_stop`
+  ablation shows the stops alone do ~nothing. Event mode *does* lift
+  sharpe/alpha on 2023→now (pre_breakout flips to +0.38 alpha) but loses badly
+  in bull-2021/bear-2022. Fails the Q3 gate (sharpe+DD across regimes). Next
+  lever = decouple the hold from the W-FRI grid (manage bar-by-bar across weeks)
+  — out of scope here, changes `_stats`/cost parity. See `/tmp/event_RESULT.md`.
 - **2026-05-30** — feat: `breakout_thrust` sub-score in `engine/score.py`
   (`_breakout_thrust_score`) + its vectorized mirror in `engine/score_vec.py`.
   Trapezoid on `px/pivot - 1`: 0 at/below the causal pivot (`rolling_high`,
@@ -110,15 +131,18 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Known issues / TODO
 
-- `base_breakout_v1` still runs in rebalance mode. True event-driven
-  entry (enter on the day price > pivot AND volume > 2× avg, not at the
-  next Friday) is not implemented. When implementing, add
-  `BacktestConfig.mode: "event"` and gate the new path on that flag —
-  don't break the rebalance path.
-- The scoring sub-score `breakout` produces a continuous value, not a
-  binary trigger. For genuine R:R asymmetry the engine needs a separate
-  event detector (not a top-N ranker). Plan it before extending
-  `base_breakout_v1`.
+- **DONE (2026-05-31)** — event-driven entry is implemented:
+  `BacktestConfig.mode` (`"rebalance"` default / `"event"`), gated so the
+  rebalance path stays bit-identical. Per decision Q1 the event detector
+  fires on the **weekly W-FRI bar** (not a daily scan — that would break
+  `n_per_year=52`, per-rebalance cost, and weekly-resample parity):
+  `_breakout_event_fired` requires `close > prior-N high` AND
+  `volume >= k*avg_vol` within the trailing `event_window_bars`. It filters
+  the ranked picks; it is NOT a separate detector replacing the ranker (the
+  ranker still orders, the event gates entry). See README "Entry modes".
+- The scoring sub-score `breakout` is still a continuous ranker. The event
+  mode now supplies the missing binary trigger as an entry *filter* on top of
+  the ranking + tight stops, which is what creates the R:R asymmetry.
 - `pre_breakout_v1` has `corr(score, return) ≈ -0.03` — the score is not
   predictive in its current form. The auto-tuner may still find local
   improvements, but don't expect it to fix the fundamental signal.
