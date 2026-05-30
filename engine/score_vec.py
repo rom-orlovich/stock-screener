@@ -38,6 +38,7 @@ from .score import (  # noqa: F401
     _norm,
     _pos_at_daily,
     _pos_at_weekly,
+    _timeframe_score_at,
     precompute_indicators,
     score_ticker_at,
     timeframe_score,
@@ -378,24 +379,32 @@ def score_universe_at(universe_pre: dict, d0, f: Formula) -> Dict[str, float]:
         daily_total, daily_uptrend = _daily_score_vectorized(universe_pre, d_pos, f, fast_mask)
         fast_idx = np.where(fast_mask)[0]
         tw = _norm(f.raw["timeframe_weights"])
-        # Weekly + monthly stay per-ticker. The daily piece is the vectorized
-        # part — we paste it back into score_ticker_at's structure by calling
-        # the per-ticker path for weekly + monthly only, then re-combining.
+        # Weekly + monthly stay per-ticker. Daily is taken straight from the
+        # vectorized arrays — DO NOT call score_ticker_at here, or daily ends
+        # up being computed twice per ticker and the whole speedup vanishes.
         for j, i in enumerate(fast_idx):
             tkr = tickers[i]
             pre = per_ticker[tkr]
-            # Reuse score_ticker_at to handle weekly+monthly (same code path),
-            # then *replace* the daily sub-score with our vectorized value.
-            r = score_ticker_at(pre, d0, f)
-            sub = r["timeframes"]
-            sub["daily"] = dict(sub["daily"])  # don't mutate cached object
-            sub["daily"]["total"] = float(daily_total[j])
-            sub["daily"]["uptrend"] = bool(daily_uptrend[j])
-            base = sum(tw[tf] * sub[tf]["total"] for tf in tw)
+            weekly_pre = pre["weekly"]
+            w_pos = _pos_at_weekly(weekly_pre["close"].index, d0)
+            weekly_sub = _timeframe_score_at(weekly_pre, w_pos, f)
+            monthly_slice = _build_monthly_at_d0(pre, d0)
+            monthly_sub = timeframe_score(monthly_slice, f)
+
+            daily_t = float(daily_total[j])
+            daily_up = bool(daily_uptrend[j])
+            sub = {
+                "daily": {"total": daily_t, "uptrend": daily_up},
+                "weekly": weekly_sub,
+                "monthly": monthly_sub,
+            }
+            base = (tw.get("daily", 0.0) * daily_t
+                    + tw.get("weekly", 0.0) * weekly_sub["total"]
+                    + tw.get("monthly", 0.0) * monthly_sub["total"])
             if f.direction == "reversion":
-                aligned = not any(sub[tf]["uptrend"] for tf in ("daily", "weekly", "monthly"))
+                aligned = not (daily_up or weekly_sub["uptrend"] or monthly_sub["uptrend"])
             else:
-                aligned = all(sub[tf]["uptrend"] for tf in ("daily", "weekly", "monthly"))
+                aligned = daily_up and weekly_sub["uptrend"] and monthly_sub["uptrend"]
             bonus = f.raw.get("alignment_bonus", 0.0) if aligned else 0.0
             final = round(_clip01(base + bonus), 4)
             scores[tkr] = final
