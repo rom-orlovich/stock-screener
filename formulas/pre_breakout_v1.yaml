@@ -25,17 +25,21 @@ indicators:
   bb_squeeze_lookback: 60        # criterion #4: trailing window for percentile
   bb_squeeze_percentile: 0.20    # bottom 20% -> sub-score 1.0
 
-# Four criteria are equal-weighted; trend gets a small confirmation weight so
-# we don't pick coiled-spring downtrends. Momentum/rsi/volatility off.
+  trend_gate_quietness: true     # Stage-2: quietness terms only count when px > sma_slow
+
+# Re-weighted toward direction: breakout proximity + breakout_thrust + trend now
+# carry 0.60 of the score (was 0.30), with atr_contraction + volume_dryup as the
+# confirming quietness pair. bb_squeeze dropped to 0 — duplicates atr_contraction.
 timeframe_score_weights:
   momentum: 0.00
-  trend: 0.10
+  trend: 0.15
   rsi: 0.00
   breakout: 0.20                 # proximity to 55-day high
+  breakout_thrust: 0.25          # the early break itself (1-3% above pivot)
   volatility: 0.00
-  atr_contraction: 0.25          # vol contraction
+  atr_contraction: 0.20          # vol contraction
   volume_dryup: 0.20             # volume dry-up
-  bb_squeeze: 0.25               # band squeeze
+  bb_squeeze: 0.00               # off — duplicates atr_contraction
 
 # Filter band still used by the rsi sub-score if anyone re-enables it.
 rsi_band: [40, 70]
@@ -55,6 +59,7 @@ bounds:
   sma_slow: [40, 100]
   momentum_lookback: [20, 120]
   breakout_lookback: [20, 100]
+  breakout_thrust: [0.10, 0.40]
   atr_period: [7, 28]
   atr_contraction_lookback: [10, 60]
   atr_contraction_threshold: [0.10, 0.50]

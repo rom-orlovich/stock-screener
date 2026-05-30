@@ -254,6 +254,21 @@ def _daily_score_vectorized(
             np.where(close >= hi, np.clip(push, 0.0, 1.0), np.clip(near, 0.0, 1.0)),
         )
 
+    # breakout_thrust — vectorized mirror of score._breakout_thrust_score.
+    t_lo = cfg.get("breakout_thrust_band_lo", 0.01)
+    t_hi = cfg.get("breakout_thrust_band_hi", 0.03)
+    t_fade = cfg.get("breakout_thrust_fade", 0.05)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        pct = np.where(hi > 0, close / hi - 1.0, np.nan)
+        ramp = np.clip(pct / t_lo, 0.0, 1.0)
+        fade_v = np.clip((t_fade - pct) / (t_fade - t_hi), 0.0, 1.0)
+    thrust_s = np.where(
+        ~np.isfinite(hi) | (hi <= 0) | ~np.isfinite(pct) | (pct <= 0.0), 0.0,
+        np.where(pct < t_lo, ramp,
+                 np.where(pct <= t_hi, 1.0,
+                          np.where(pct < t_fade, fade_v, 0.0))),
+    )
+
     # Volatility
     vol_s = np.where(np.isnan(vol), 0.0, np.clip((0.05 - vol) / 0.04, 0.0, 1.0))
 
@@ -312,6 +327,14 @@ def _daily_score_vectorized(
             else:
                 bbsq_s[j] = _clip01((1.0 - rank) / max(1.0 - bb_pct, 1e-6))
 
+    # Stage-2 trend gate (opt-in via YAML) — mirror of the per-d0 path: the
+    # quietness terms only count when price sits above the slow SMA.
+    if cfg.get("trend_gate_quietness", False):
+        gate = np.isfinite(ss) & (close > ss)
+        atr_s = np.where(gate, atr_s, 0.0)
+        vdry_s = np.where(gate, vdry_s, 0.0)
+        bbsq_s = np.where(gate, bbsq_s, 0.0)
+
     # Match the per-ticker path: weighted sum of UNROUNDED sub-scores, then
     # round only the total. Pre-rounding each sub-score before summing would
     # introduce ~5e-5 drift per term — caught by parity_cross_section.py.
@@ -319,6 +342,7 @@ def _daily_score_vectorized(
              + w.get("trend", 0.0) * trend_s
              + w.get("rsi", 0.0) * rsi_s
              + w.get("breakout", 0.0) * brk_s
+             + w.get("breakout_thrust", 0.0) * thrust_s
              + w.get("volatility", 0.0) * vol_s
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s

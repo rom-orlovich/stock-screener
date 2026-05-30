@@ -23,16 +23,21 @@ indicators:
   bb_squeeze_lookback: 60
   bb_squeeze_percentile: 0.20
 
-# Weight the structural gates heavily; trend gives the Stage-2 confirmation.
+  trend_gate_quietness: true     # Stage-2: quietness terms only count when px > sma_slow
+
+# Direction-weighted: the break + thrust + trend carry the score; one quietness
+# term (atr_contraction) plus volume dry-up confirm the coil. bb_squeeze dropped
+# to 0 — it duplicates atr_contraction (same low-realized-vol latent factor).
 timeframe_score_weights:
   momentum: 0.05
   trend: 0.20
   rsi: 0.00
-  breakout: 0.25                 # proximity to base pivot
+  breakout: 0.20                 # proximity to base pivot
+  breakout_thrust: 0.25          # the early break itself (1-3% above pivot)
   volatility: 0.00
-  atr_contraction: 0.20
+  atr_contraction: 0.15
   volume_dryup: 0.15
-  bb_squeeze: 0.15
+  bb_squeeze: 0.00
 
 rsi_band: [45, 75]
 
@@ -50,6 +55,7 @@ bounds:
   sma_slow: [150, 300]
   momentum_lookback: [20, 120]
   breakout_lookback: [20, 60]
+  breakout_thrust: [0.10, 0.40]
   atr_period: [7, 28]
   atr_contraction_lookback: [15, 60]
   atr_contraction_threshold: [0.15, 0.50]

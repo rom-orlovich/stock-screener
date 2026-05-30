@@ -39,7 +39,7 @@ Outputs land in `runs/`:
 ## How scoring works
 
 Every formula in `formulas/*.yaml` produces a 0-1 score per ticker per day.
-The score is a weighted sum of up to eight sub-scores, computed across three
+The score is a weighted sum of up to nine sub-scores, computed across three
 timeframes (`daily`, `weekly`, `monthly`):
 
 | Sub-score | What it measures |
@@ -48,10 +48,11 @@ timeframes (`daily`, `weekly`, `monthly`):
 | `trend` | SMA-fast > SMA-slow and price above both |
 | `rsi` | Inside `rsi_band`, decaying outside |
 | `breakout` | Proximity to N-day high (long) or low (`direction: reversion`) |
+| `breakout_thrust` | `close` sitting just above the causal pivot — peaks 1-3% above, fades to 0 by ~5% (don't chase). Rewards the early break itself, not just nearness |
 | `volatility` | Lowest stdev of daily returns → highest score |
-| `atr_contraction` | ATR-% today vs N sessions ago — vol contraction = squeeze |
-| `volume_dryup` | 20d avg vol < 80% of 60d avg vol |
-| `bb_squeeze` | Current BB-width in bottom quintile of trailing window |
+| `atr_contraction` | ATR-% today vs N sessions ago — vol contraction = squeeze. Gated to `px > sma_slow` when the YAML sets `trend_gate_quietness: true` (Stage-2) |
+| `volume_dryup` | 20d avg vol < 80% of 60d avg vol (also `trend_gate_quietness`-gated) |
+| `bb_squeeze` | Current BB-width in bottom quintile of trailing window (also `trend_gate_quietness`-gated) |
 
 Sub-scores are mixed by `timeframe_score_weights` per timeframe, then the
 three timeframes are mixed by `timeframe_weights`, then an `alignment_bonus`

@@ -50,6 +50,29 @@ def _clip01(x: float) -> float:
     return float(max(0.0, min(1.0, x)))
 
 
+def _breakout_thrust_score(px: float, hi: float,
+                           lo_band: float, hi_band: float, fade: float) -> float:
+    """Reward `close` sitting just above the causal pivot `hi`.
+
+    `hi` is the prior-N-bar high (`rolling_high` excludes the current bar — no
+    lookahead). Trapezoid in pct = px/hi - 1: 0 at/below the pivot, ramps 0->1
+    across (0, lo_band], holds 1.0 on [lo_band, hi_band], fades 1->0 across
+    (hi_band, fade), and 0 beyond `fade` (don't chase an extended break).
+    """
+    if not (pd.notna(hi) and hi > 0):
+        return 0.0
+    pct = px / hi - 1.0
+    if pct <= 0.0:
+        return 0.0
+    if pct < lo_band:
+        return _clip01(pct / lo_band)
+    if pct <= hi_band:
+        return 1.0
+    if pct < fade:
+        return _clip01((fade - pct) / (fade - hi_band))
+    return 0.0
+
+
 def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
     """Score a single timeframe's OHLCV. Returns sub-scores + trend flag.
 
@@ -84,7 +107,7 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
 
     if n_avail < local_sma_slow + 1:
         return {"momentum": 0.0, "trend": 0.0, "rsi": 0.0,
-                "breakout": 0.0, "volatility": 0.0,
+                "breakout": 0.0, "breakout_thrust": 0.0, "volatility": 0.0,
                 "atr_contraction": 0.0, "volume_dryup": 0.0,
                 "bb_squeeze": 0.0,
                 "total": 0.0, "uptrend": False}
@@ -138,6 +161,14 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
             brk_s = _clip01(px / hi - 0.0) if px >= hi else _clip01(1 - (hi - px) / hi * 5)
         else:
             brk_s = 0.0
+
+    # breakout_thrust: reward the early break (close 1-3% above the causal pivot),
+    # fading out beyond ~5% so we don't chase. Uses the same `hi` (rolling_high,
+    # current bar excluded) — causal, no lookahead.
+    t_lo = cfg.get("breakout_thrust_band_lo", 0.01)
+    t_hi = cfg.get("breakout_thrust_band_hi", 0.03)
+    t_fade = cfg.get("breakout_thrust_fade", 0.05)
+    thrust_s = _breakout_thrust_score(px, hi, t_lo, t_hi, t_fade)
 
     # volatility sub-score: lowest 90-day stdev of returns -> highest score
     # Optional — only contributes if YAML weights include `volatility`.
@@ -205,17 +236,25 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
         except Exception:  # noqa: BLE001
             bbsq_s = 0.0
 
+    # Stage-2 trend gate (opt-in via YAML): the quietness terms only count when
+    # price sits above the slow SMA, dropping "quiet downtrend / topping" false
+    # positives. Causal — `ss` uses only data up to the current bar.
+    if cfg.get("trend_gate_quietness", False) and not (pd.notna(ss) and px > ss):
+        atr_s = vdry_s = bbsq_s = 0.0
+
     w = _norm(f.raw["timeframe_score_weights"])
     total = (w.get("momentum", 0.0) * mom_s
              + w.get("trend", 0.0) * trend_s
              + w.get("rsi", 0.0) * rsi_s
              + w.get("breakout", 0.0) * brk_s
+             + w.get("breakout_thrust", 0.0) * thrust_s
              + w.get("volatility", 0.0) * vol_s
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
              + w.get("bb_squeeze", 0.0) * bbsq_s)
     return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
             "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
+            "breakout_thrust": round(thrust_s, 4),
             "volatility": round(vol_s, 4),
             "atr_contraction": round(atr_s, 4),
             "volume_dryup": round(vdry_s, 4),
@@ -418,7 +457,7 @@ def _build_monthly_at_d0(precomputed: dict, d0: pd.Timestamp) -> pd.DataFrame:
 
 _EMPTY_TF = {
     "momentum": 0.0, "trend": 0.0, "rsi": 0.0,
-    "breakout": 0.0, "volatility": 0.0,
+    "breakout": 0.0, "breakout_thrust": 0.0, "volatility": 0.0,
     "atr_contraction": 0.0, "volume_dryup": 0.0,
     "bb_squeeze": 0.0,
     "total": 0.0, "uptrend": False,
@@ -512,6 +551,11 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
         else:
             brk_s = 0.0
 
+    t_lo = cfg.get("breakout_thrust_band_lo", 0.01)
+    t_hi = cfg.get("breakout_thrust_band_hi", 0.03)
+    t_fade = cfg.get("breakout_thrust_fade", 0.05)
+    thrust_s = _breakout_thrust_score(px, hi, t_lo, t_hi, t_fade)
+
     vol = pre["stdev_returns"].iloc[pos]
     if pd.notna(vol):
         vol_s = _clip01((0.05 - vol) / 0.04)
@@ -569,17 +613,23 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
         except Exception:  # noqa: BLE001
             bbsq_s = 0.0
 
+    # Stage-2 trend gate (opt-in via YAML) — mirror of the per-d0 path.
+    if cfg.get("trend_gate_quietness", False) and not (pd.notna(ss) and px > ss):
+        atr_s = vdry_s = bbsq_s = 0.0
+
     w = _norm(f.raw["timeframe_score_weights"])
     total = (w.get("momentum", 0.0) * mom_s
              + w.get("trend", 0.0) * trend_s
              + w.get("rsi", 0.0) * rsi_s
              + w.get("breakout", 0.0) * brk_s
+             + w.get("breakout_thrust", 0.0) * thrust_s
              + w.get("volatility", 0.0) * vol_s
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
              + w.get("bb_squeeze", 0.0) * bbsq_s)
     return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
             "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
+            "breakout_thrust": round(thrust_s, 4),
             "volatility": round(vol_s, 4),
             "atr_contraction": round(atr_s, 4),
             "volume_dryup": round(vdry_s, 4),

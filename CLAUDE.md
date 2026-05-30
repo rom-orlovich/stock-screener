@@ -49,9 +49,15 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 ## Key files (do not break)
 
 - `engine/score.py` — central scoring math. The sub-score keys it
-  produces (`momentum`, `trend`, `rsi`, `breakout`, `volatility`,
-  `atr_contraction`, `volume_dryup`, `bb_squeeze`) MUST stay aligned
-  with `timeframe_score_weights` in every YAML.
+  produces (`momentum`, `trend`, `rsi`, `breakout`, `breakout_thrust`,
+  `volatility`, `atr_contraction`, `volume_dryup`, `bb_squeeze`) do NOT
+  need to be present in every YAML. The scorer reads each weight via
+  `w.get(key, 0.0)` and `_norm` sums only the keys actually present, so a
+  key absent from a formula contributes 0 and does not renormalize it. The
+  YAMLs are already non-uniform (e.g. `momentum_v1`/`mean_reversion_v1`
+  carry only `momentum/trend/rsi/breakout`). Add a new sub-score's weight
+  key only to the formulas that use it. `breakout_thrust` lives only in the
+  two breakout YAMLs.
 - `engine/backtest.py` — walks the calendar; respects `absolute_momentum`
   block for regime rotation; exit logic priority is fixed (stop → trail
   → tp → time → hold). Don't reorder.
@@ -63,6 +69,16 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-05-30** — feat: `breakout_thrust` sub-score in `engine/score.py`
+  (`_breakout_thrust_score`) + its vectorized mirror in `engine/score_vec.py`.
+  Trapezoid on `px/pivot - 1`: 0 at/below the causal pivot (`rolling_high`,
+  current bar excluded), peaks 1-3% above, fades to 0 by ~5% (don't chase).
+  Wired into all three paths (`timeframe_score`, `_timeframe_score_at`,
+  `_daily_score_vectorized`) via `w.get("breakout_thrust", 0.0)`. New opt-in
+  YAML knob `trend_gate_quietness` zeros `atr_contraction`/`volume_dryup`/
+  `bb_squeeze` unless `px > sma_slow` (Stage-2). Both gated to the two breakout
+  YAMLs only (re-weighted toward direction, `bb_squeeze`→0). Tests:
+  `scripts/parity_breakout_thrust.py` (shape + tri-path parity).
 - **2026-05-30** — perf: `engine/bank.py` (new module) — shared per-ticker
   indicator bank. Computes the union of every formula's `(indicator, period)`
   ONCE per ticker (28 distinct vs 132 recomputed across 12 formulas);
