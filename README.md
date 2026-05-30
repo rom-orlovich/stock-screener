@@ -261,6 +261,11 @@ bash backtest_regimes.sh
 - `engine/atr.py` — true range, Wilder ATR, ATR-%, Bollinger band width,
   OBV, avg volume, avg-dollar volume, **`base_range_pct`** (consolidation
   detector), **`base_pivot`** (breakout trigger level)
+- `engine/bank.py` — shared per-ticker **indicator bank** (perf): computes the
+  union of every formula's `(indicator, period)` once per ticker and reuses it
+  across all formulas. `collect_specs` / `build_bank` / `assemble_precompute`.
+  Output is bit-identical to `precompute_indicators`; opt-in via
+  `run_regimes.py --shared-bank`.
 
 All pure functions, no I/O, no globals.
 

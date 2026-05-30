@@ -263,7 +263,14 @@ def _market_regime_ok(price_data: dict[str, pd.DataFrame], abs_cfg: dict, d0: pd
 
 
 def run(price_data: dict[str, pd.DataFrame], f: Formula,
-        start: str, end: str, cfg: BacktestConfig | None = None) -> BacktestResult:
+        start: str, end: str, cfg: BacktestConfig | None = None,
+        bank: dict | None = None) -> BacktestResult:
+    """`bank`: optional {ticker: indicator-bank} from engine.bank.build_bank, shared
+    across formulas (and across fork workers). When present, the vectorized path
+    assembles each ticker's precompute from it instead of recomputing — bit-identical
+    output (proven by scripts/parity_bank.py), far less CPU. Ignored unless the
+    vectorized path is active.
+    """
     cfg = cfg or BacktestConfig()
     dates = pd.date_range(start=start, end=end, freq=cfg.rebalance)
     if len(dates) < 2:
@@ -285,9 +292,15 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
         # Cross-section vectorization subsumes the per-ticker precompute.
         universe_pre = precompute_universe(price_data, f)
     elif use_vec:
+        assemble = None
+        if bank is not None:
+            from .bank import assemble_precompute as assemble  # lazy: only when sharing
         for tkr, df in price_data.items():
             try:
-                precomputed[tkr] = precompute_indicators(df, f)
+                if assemble is not None and tkr in bank:
+                    precomputed[tkr] = assemble(bank[tkr], f)
+                else:
+                    precomputed[tkr] = precompute_indicators(df, f)
             except Exception:  # noqa: BLE001
                 precomputed[tkr] = None
 

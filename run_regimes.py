@@ -36,6 +36,19 @@ RUNS = ROOT / "runs"
 FORMULAS = ROOT / "formulas"
 REGIMES_FP = ROOT / "regimes.json"
 
+# Parent-owned panel, shared with workers via fork copy-on-write. Set in main()
+# BEFORE the pool is created so forked workers inherit it (one physical copy for
+# all workers). Under spawn this stays None in the child and _run_job re-loads
+# from the warm pickle cache (legacy path).
+_SHARED_DATA: dict | None = None
+
+# Parent-owned indicator bank {ticker: bank}, also fork-inherited. Built once over
+# the union of all formulas' (indicator, period) specs so the formula-independent
+# series (rsi/atr/bb/volume/monthly resample, ~28 distinct vs 132 recomputed) are
+# computed once per ticker instead of once per formula. None = legacy per-formula
+# precompute. Only used on the vectorized path.
+_SHARED_BANK: dict | None = None
+
 
 def load_regimes() -> list[dict]:
     cfg = json.loads(REGIMES_FP.read_text())
@@ -107,21 +120,38 @@ def classify_current_regime(data: dict[str, pd.DataFrame]) -> dict:
 
 
 def _run_job(payload):
-    """Worker entry point: re-loads data from the warm pickle cache, runs ONE
-    (formula, regime) backtest, returns (formula_name, regime_name, stats_or_err).
+    """Worker entry point: runs ONE (formula, regime) backtest, returns
+    (formula_name, regime_name, stats_or_err).
 
-    Workers inherit the parent's environment under spawn, so
-    USE_VECTORIZED_SCORING propagates without extra plumbing.
+    Data source, in order:
+      1. `_SHARED_DATA` — the parent's in-memory panel, inherited via fork COW.
+         No deserialization, no extra RAM (read-only pages are shared).
+      2. warm pickle cache via get_universe — the spawn fallback (fresh
+         interpreter, so the global is None) and the sequential legacy path.
+    Workers inherit the parent's environment under both fork and spawn, so
+    USE_VECTORIZED_SCORING / USE_SHARED_BANK propagate without extra plumbing.
     """
     fp_str, regime, tickers, fetch_start, widest_end = payload
     fp = Path(fp_str)
     raw = yaml.safe_load(fp.read_text())
     f = Formula(raw=raw)
     cfg = cfg_for(raw)
-    # Warm pickle cache: this is fast (no network).
-    data = get_universe(tickers, start=fetch_start, end=widest_end, provider="yf")
+    if _SHARED_DATA is not None:
+        data = _SHARED_DATA
+    else:
+        # Warm pickle cache: this is fast (no network).
+        data = get_universe(tickers, start=fetch_start, end=widest_end, provider="yf")
+    bank = _SHARED_BANK  # fork-inherited; None under spawn / when not requested
+    if bank is None and os.environ.get("USE_SHARED_BANK", "0") == "1":
+        # Spawn worker: the parent's bank wasn't inherited (fresh interpreter), so
+        # build it here from the cache-hydrated panel. Still one bank per worker,
+        # reused across this worker's formulas-less single job (no cross-formula
+        # win under spawn, but parity is identical — the win is a fork concern).
+        from engine.bank import build_bank, collect_specs
+        specs = collect_specs([f])
+        bank = {t: build_bank(df, specs) for t, df in data.items()}
     try:
-        res = bt.run(data, f, start=regime["start"], end=regime["end"], cfg=cfg)
+        res = bt.run(data, f, start=regime["start"], end=regime["end"], cfg=cfg, bank=bank)
         stats = res.stats
         return fp.stem, regime["name"], {
             "regime_label": regime["label"],
@@ -157,11 +187,31 @@ def _flush_matrix(matrix: dict, regimes: list[dict], current: dict) -> None:
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--parallel", type=int, default=1,
-                   help="Number of (formula, regime) jobs to run concurrently "
-                        "via spawn pool. 0 = auto (cpu_count // 2). 1 = sequential.")
+                   help="Number of (formula, regime) jobs to run concurrently. "
+                        "0 = auto (cpu_count // 2). 1 = sequential.")
     p.add_argument("--vectorized", action="store_true",
                    help="Set USE_VECTORIZED_SCORING=1 for this run (and inherited by workers).")
+    p.add_argument("--shared-bank", action="store_true",
+                   help="Build the per-ticker indicator bank once in the parent and "
+                        "share it across all formulas (fork-inherited). Computes each "
+                        "(indicator, period) once instead of once per formula. Implies "
+                        "--vectorized (the bank only feeds the vectorized path).")
+    p.add_argument("--mp-context", choices=("fork", "spawn"), default="fork",
+                   help="Multiprocessing start method. 'fork' (Linux default) lets "
+                        "workers inherit the parent panel via COW — no per-worker "
+                        "pickle reload, lower RAM, so more workers fit. 'spawn' is the "
+                        "portable fallback (each worker re-loads from the cache).")
+    p.add_argument("--end", default=None,
+                   help="Pin the widest window end (YYYY-MM-DD). Default: each regime's "
+                        "own end, dynamic ends -> yesterday. Use to reproduce a run "
+                        "against a cached window.")
+    p.add_argument("--limit", type=int, default=0,
+                   help="Cap the universe to the first N tickers (0 = full sp500). "
+                        "For fast parity/dev runs.")
     args = p.parse_args()
+    if args.shared_bank:
+        args.vectorized = True  # the bank only feeds the vectorized scorer
+        os.environ["USE_SHARED_BANK"] = "1"
     if args.vectorized:
         os.environ["USE_VECTORIZED_SCORING"] = "1"
     if args.parallel == 0:
@@ -172,16 +222,27 @@ def main():
     if not regimes:
         print("no regimes defined in regimes.json")
         return
+    # Pin: clamp any regime end past --end down to it (reproducible cached window).
+    if args.end:
+        for r in regimes:
+            if r["end"] > args.end:
+                r["end"] = args.end
 
     # Fetch ONE wide window covering every regime + 8-month warmup.
     widest_start = min(r["start"] for r in regimes)
     widest_end = max(r["end"] for r in regimes)
     fetch_start = (pd.Timestamp(widest_start) - pd.DateOffset(months=8)).strftime("%Y-%m-%d")
     tickers = sp500()
+    if args.limit and args.limit > 0:
+        tickers = tickers[: args.limit]
     if "SPY" not in tickers:
         tickers.append("SPY")
     print(f"fetching {len(tickers)} tickers  window {fetch_start} -> {widest_end}", flush=True)
     data = get_universe(tickers, start=fetch_start, end=widest_end, provider="yf")
+
+    # Publish the panel for fork workers to inherit (COW). Must precede pool init.
+    global _SHARED_DATA
+    _SHARED_DATA = data
 
     # Classify current regime once (uses latest data).
     current = classify_current_regime(data)
@@ -191,9 +252,25 @@ def main():
     # Build matrix: formula x regime x stats
     matrix: dict[str, dict] = {}
     formulas = sorted(p for p in FORMULAS.glob("*.yaml") if ".bak_" not in p.name)
+
+    # Shared indicator bank: compute the union of every formula's (indicator, period)
+    # ONCE per ticker here in the parent; fork workers inherit it (COW). Must precede
+    # pool init. Only meaningful on the vectorized path.
+    if os.environ.get("USE_SHARED_BANK", "0") == "1":
+        from engine.bank import build_bank, collect_specs
+        from engine.score import Formula as _F
+        f_objs = [_F(raw=yaml.safe_load(fp.read_text())) for fp in formulas]
+        specs = collect_specs(f_objs)
+        print(f"building shared bank: {len(specs)} distinct (indicator, period) "
+              f"specs over {len(data)} tickers ...", flush=True)
+        global _SHARED_BANK
+        _SHARED_BANK = {t: build_bank(df, specs) for t, df in data.items()}
+
     n_jobs = len(formulas) * len(regimes)
+    mp = args.mp_context if args.parallel != 1 else "sequential"
     print(f"\nrunning {len(formulas)} formulas x {len(regimes)} regimes = {n_jobs} backtests"
-          f"   parallel={args.parallel}   vectorized={os.environ.get('USE_VECTORIZED_SCORING', '0') == '1'}",
+          f"   parallel={args.parallel} ({mp})"
+          f"   vectorized={os.environ.get('USE_VECTORIZED_SCORING', '0') == '1'}",
           flush=True)
     for fp in formulas:
         matrix[fp.stem] = {}
@@ -210,14 +287,16 @@ def main():
                 print(f"  {name:35s} {rname:15s}  sharpe={sh}  return={ret}", flush=True)
                 _flush_matrix(matrix, regimes, current)
     else:
-        # spawn pool — each worker re-loads data from the warm pickle cache.
+        # Process pool. Under fork (default) workers inherit _SHARED_DATA via COW —
+        # no per-worker reload, so RAM stays flat and more workers fit. Under spawn
+        # each worker re-loads from the warm pickle cache.
         # imap_unordered streams results as soon as each job finishes; we
         # update the matrix and flush to disk every result so a kill loses at
         # most one in-flight backtest.
         from multiprocessing import get_context
         jobs = [(str(fp), r, tickers, fetch_start, widest_end)
                 for fp in formulas for r in regimes]
-        ctx = get_context("spawn")
+        ctx = get_context(args.mp_context)
         done = 0
         with ctx.Pool(args.parallel) as pool:
             for name, rname, result in pool.imap_unordered(_run_job, jobs):

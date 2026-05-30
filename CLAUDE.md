@@ -63,6 +63,22 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-05-30** — perf: `engine/bank.py` (new module) — shared per-ticker
+  indicator bank. Computes the union of every formula's `(indicator, period)`
+  ONCE per ticker (28 distinct vs 132 recomputed across 12 formulas);
+  `assemble_precompute()` selects each formula's subset. Bit-identical to
+  `precompute_indicators` (`scripts/parity_bank.py`). `bt.run()` gained an
+  optional `bank=` param. Opt-in via `run_regimes.py --shared-bank`.
+- **2026-05-30** — perf: `run_regimes.py` fork pool. Parent builds the panel
+  once; `--mp-context fork` (default) lets workers inherit it via COW instead
+  of re-reading ~504 pickles each. Added `--end` pin, `--limit`, `--shared-bank`.
+  `backtest_regimes.sh` now runs `--parallel $(nproc) --mp-context fork
+  --shared-bank`; `auto_tune_all.sh` exports `USE_VECTORIZED_SCORING=1`.
+- **2026-05-30** — PROFILER FINDING (`scripts/profile_split.py`): per-d0
+  scoring is **95.5%** of a vectorized backtest, precompute only 4.5%. So the
+  bank is a ~7% win (not 2×), and a daily cross-section is near-worthless — the
+  real bottleneck is the weekly/monthly per-d0 recompute (the adaptive-cap
+  fallback at `score.py:444-462`). That's the next lever (high parity risk).
 - **2026-05-27** — added `base_range_pct` / `base_pivot` to `engine/atr.py`
 - **2026-05-27** — added `momentum_skip_recent` knob to `engine/score.py`
   (for 12-1 dual momentum)
