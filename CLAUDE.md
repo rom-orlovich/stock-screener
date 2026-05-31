@@ -91,18 +91,22 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
   `run.py --mode managed`. Tests: `scripts/test_managed_path.py`. **Validation
   verdict (HONEST, `scripts/validate_managed_path.py`, full sp500 × {2023→now,
   2018→now, bull_2021, bear_2022, ai_2023_2024} × 3 modes, parallel=3):** managed
-  is the FIRST mode with real R:R asymmetry — **payoff 1.11–1.45** (1.21+ in every
-  non-bear cell; highest of the 3 modes in all 10 cells; vs event ~0.85–1.18,
-  reb ~0.93–1.18), losers cut ~8 bars vs
-  winners ~12–14, and it **roughly halves event's drawdown** (base full_2023
-  −0.134 vs event −0.278). BUT avg hold is only ~2.4–2.6 weeks (capped by
-  `time_stop_bars=15`; exits time-dominated — base full_2023 time 709/stop 314/
-  trail 92), event still wins **total return** outright (base full_2023 +1.03 vs
-  +0.65), alpha stays negative on long windows, and sharpe is a wash (managed wins
-  full windows + ai, loses clean bull_2021 to weekly reload). A better-shaped,
-  lower-DD, lower-return system — not a free lunch. YAML `mode:` left at `event`.
-  Next lever = raise/drop `time_stop_bars` to let winners truly run. See
-  `/tmp/managed_RESULT.md`. Not pushed/merged.
+  is the FIRST mode with real R:R asymmetry — **payoff 1.11–1.35**, highest of the
+  3 modes in all 10 cells (vs event ~0.85–1.16, reb ~0.98–1.10; the only mode with
+  payoff>1 in the bear). Winners held ~14 daily bars vs losers ~10, and it has the
+  **best sharpe of the 3 on both full windows + both AI windows** (base full_2023
+  1.44 vs event 1.27 vs reb 1.01) and **the best max-DD vs event in all 10 cells**
+  (roughly halves it: base full_2023 −0.134 vs event −0.278; both 2018 windows
+  ~−0.16 vs event −0.42/−0.45). It loses sharpe only in the clean broad bull_2021
+  (1.94 vs reb 2.34). Trade-off is raw return/alpha: event wins return on 2023→now
+  (base +1.03 vs mgd +0.77) but **collapses on 2018→now where managed wins
+  decisively** (mgd +1.37 vs evt +0.39); managed alpha stays ~flat-to-negative,
+  event has the only positive long-window alpha (pre full_2023 +0.38) but at ~2.4×
+  the DD. Avg hold only ~2.3–2.5 weeks (capped by `time_stop_bars=15`; exits
+  time-dominated — base full_2023 time 709/stop 314/trail 92). Net: lower-beta,
+  lower-DD, asymmetric — strongest on the sharpe+DD gate, not a free lunch on
+  return. YAML `mode:` left at `event`. Next lever = raise/drop `time_stop_bars`
+  to let winners truly run. See `/tmp/managed_RESULT.md`. Not pushed/merged.
 - **2026-05-31** — feat: event-entry path. `BacktestConfig.mode`
   (`rebalance` default / `event`), `_breakout_event_fired` (causal,
   vectorized: `close > prior-N high` AND `volume >= k*avg`, trailing
