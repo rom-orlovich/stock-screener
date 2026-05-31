@@ -29,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 from engine import backtest as bt  # noqa: E402
 from engine.data import get_universe  # noqa: E402
 from engine.score import Formula  # noqa: E402
-from engine.universe import sp500  # noqa: E402
+from engine.universe import get_universe_tickers, liquidity_filter  # noqa: E402
 
 RUNS = ROOT / "runs"
 FORMULAS = ROOT / "formulas"
@@ -83,6 +83,12 @@ def _run_one(fp: Path, args, data: dict) -> tuple[str, dict]:
     inside the process-pool workers (which re-fetch from warm cache)."""
     f = Formula.load(fp)
     cfg = _cfg(args)
+    if getattr(args, "min_liquidity", 0) > 0:
+        # Keep the benchmark even if it would be filtered.
+        keep_bench = data.get(args.benchmark)
+        data = liquidity_filter(data, min_avg_dollar_vol=args.min_liquidity)
+        if keep_bench is not None:
+            data[args.benchmark] = keep_bench
     res = bt.run(data, f, start=args.start, end=args.end, cfg=cfg)
     base = _write_outputs(f.version, args, res, len(data))
     print(f"  {f.version:35s} sharpe={res.stats.get('sharpe')}  return={res.stats.get('total_return')}  -> bt_summary_{base}.json",
@@ -106,6 +112,9 @@ def main():
     p.add_argument("--end", default=None,
                    help="Default = yesterday (full closing bar).")
     p.add_argument("--universe", default="sp500")
+    p.add_argument("--min-liquidity", type=float, default=0.0,
+                   help="Min 60d avg $-volume to keep a ticker (0 = disabled). "
+                        "Recommended for russell3000, e.g. 10000000 ($10M).")
     p.add_argument("--top", type=int, default=20)
     p.add_argument("--rebalance", default="W-FRI")
     p.add_argument("--stop-loss", type=float, default=0.0)
@@ -139,7 +148,7 @@ def main():
         print("no formulas to run")
         return
 
-    tickers = sp500() if args.universe == "sp500" else []
+    tickers = get_universe_tickers(args.universe)
     if args.benchmark and args.benchmark not in tickers:
         tickers = list(tickers) + [args.benchmark]
     fetch_start = (pd.Timestamp(args.start) - pd.DateOffset(months=8)).strftime("%Y-%m-%d")

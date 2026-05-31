@@ -17,7 +17,7 @@ import pandas as pd
 from engine import backtest as bt
 from engine.data import get_universe
 from engine.score import Formula, rank
-from engine.universe import liquidity_filter, sp500
+from engine.universe import get_universe_tickers, liquidity_filter
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -35,9 +35,9 @@ def _stamp() -> str:
 
 
 def _resolve_tickers(args) -> list[str]:
-    """Resolve --universe sp500 or fallback to --tickers list."""
-    if getattr(args, "universe", None) == "sp500":
-        return sp500()
+    """Resolve a named --universe (sp500/russell3000/russell1000) or --tickers."""
+    if getattr(args, "universe", None):
+        return get_universe_tickers(args.universe)
     return args.tickers
 
 
@@ -121,6 +121,10 @@ def main():
     s.add_argument("--formula", default="formulas/momentum_v1.yaml")
     s.add_argument("--provider", default="yf")
     s.add_argument("--tickers", nargs="*", default=DEFAULT_UNIVERSE)
+    s.add_argument("--universe", default=None,
+                   help="named universe (sp500/russell3000/russell1000); overrides --tickers")
+    s.add_argument("--min-liquidity", type=float, default=0.0,
+                   help="min 60d avg $-volume filter (0 = disabled)")
     s.add_argument("--top", type=int, default=15)
     s.set_defaults(func=cmd_scan)
 
@@ -129,7 +133,7 @@ def main():
     b.add_argument("--provider", default="yf")
     b.add_argument("--tickers", nargs="*", default=DEFAULT_UNIVERSE)
     b.add_argument("--universe", default=None,
-                   help="named universe (e.g. 'sp500'); overrides --tickers")
+                   help="named universe (sp500/russell3000/russell1000); overrides --tickers")
     b.add_argument("--start", required=True)
     b.add_argument("--end", required=True)
     b.add_argument("--top-n", type=int, default=5)
@@ -140,7 +144,7 @@ def main():
     b.add_argument("--trailing-stop", type=float, default=0.0,
                    help="trailing stop fraction below running peak (0 = disabled)")
     b.add_argument("--trailing-activate", type=float, default=0.05,
-                   help="activate trailing stop after this gain (default 5%)")
+                   help="activate trailing stop after this gain (default 5%%)")
     b.add_argument("--atr-stop-mult", type=float, default=0.0,
                    help="hard stop = entry - N*ATR (0 = disabled, overrides --stop-loss)")
     b.add_argument("--atr-stop-period", type=int, default=14)

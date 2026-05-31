@@ -30,7 +30,7 @@ sys.path.insert(0, str(ROOT))
 from engine import backtest as bt  # noqa: E402
 from engine.data import get_universe  # noqa: E402
 from engine.score import Formula  # noqa: E402
-from engine.universe import sp500  # noqa: E402
+from engine.universe import get_universe_tickers, liquidity_filter  # noqa: E402
 
 RUNS = ROOT / "runs"
 FORMULAS = ROOT / "formulas"
@@ -137,10 +137,17 @@ def _run_job(payload):
     f = Formula(raw=raw)
     cfg = cfg_for(raw)
     if _SHARED_DATA is not None:
-        data = _SHARED_DATA
+        data = _SHARED_DATA  # fork-inherited panel, already liquidity-filtered
     else:
-        # Warm pickle cache: this is fast (no network).
+        # Warm pickle cache: this is fast (no network). The parent filtered the
+        # fork panel; spawn workers reload raw, so apply the same filter here.
         data = get_universe(tickers, start=fetch_start, end=widest_end, provider="yf")
+        min_liq = float(os.environ.get("MIN_LIQUIDITY", "0") or "0")
+        if min_liq > 0:
+            keep_spy = data.get("SPY")
+            data = liquidity_filter(data, min_avg_dollar_vol=min_liq)
+            if keep_spy is not None:
+                data["SPY"] = keep_spy
     bank = _SHARED_BANK  # fork-inherited; None under spawn / when not requested
     if bank is None and os.environ.get("USE_SHARED_BANK", "0") == "1":
         # Spawn worker: the parent's bank wasn't inherited (fresh interpreter), so
@@ -206,8 +213,13 @@ def main():
                         "own end, dynamic ends -> yesterday. Use to reproduce a run "
                         "against a cached window.")
     p.add_argument("--limit", type=int, default=0,
-                   help="Cap the universe to the first N tickers (0 = full sp500). "
+                   help="Cap the universe to the first N tickers (0 = full universe). "
                         "For fast parity/dev runs.")
+    p.add_argument("--universe", default="sp500",
+                   help="Named universe: sp500 (default), russell3000, russell1000.")
+    p.add_argument("--min-liquidity", type=float, default=0.0,
+                   help="Min 60d avg $-volume to keep a ticker (0 = disabled). "
+                        "Recommended for russell3000, e.g. 10000000 ($10M).")
     args = p.parse_args()
     if args.shared_bank:
         args.vectorized = True  # the bank only feeds the vectorized scorer
@@ -216,6 +228,9 @@ def main():
         os.environ["USE_VECTORIZED_SCORING"] = "1"
     if args.parallel == 0:
         args.parallel = max(1, (os.cpu_count() or 2) // 2)
+    if args.min_liquidity > 0:
+        # Propagate to spawn workers (fork inherits the already-filtered panel).
+        os.environ["MIN_LIQUIDITY"] = str(args.min_liquidity)
 
     RUNS.mkdir(exist_ok=True)
     regimes = load_regimes()
@@ -232,13 +247,21 @@ def main():
     widest_start = min(r["start"] for r in regimes)
     widest_end = max(r["end"] for r in regimes)
     fetch_start = (pd.Timestamp(widest_start) - pd.DateOffset(months=8)).strftime("%Y-%m-%d")
-    tickers = sp500()
+    tickers = get_universe_tickers(args.universe)
     if args.limit and args.limit > 0:
         tickers = tickers[: args.limit]
     if "SPY" not in tickers:
         tickers.append("SPY")
     print(f"fetching {len(tickers)} tickers  window {fetch_start} -> {widest_end}", flush=True)
     data = get_universe(tickers, start=fetch_start, end=widest_end, provider="yf")
+    if args.min_liquidity > 0:
+        before = len(data)
+        keep_spy = data.get("SPY")
+        data = liquidity_filter(data, min_avg_dollar_vol=args.min_liquidity)
+        if keep_spy is not None:
+            data["SPY"] = keep_spy
+        print(f"  liquidity filter: {before} -> {len(data)} tickers "
+              f"(>= ${args.min_liquidity:,.0f})", flush=True)
 
     # Publish the panel for fork workers to inherit (COW). Must precede pool init.
     global _SHARED_DATA

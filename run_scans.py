@@ -27,7 +27,7 @@ sys.path.insert(0, str(ROOT))
 
 from engine.data import get_universe  # noqa: E402
 from engine.score import Formula, rank  # noqa: E402
-from engine.universe import liquidity_filter, sp500  # noqa: E402
+from engine.universe import get_universe_tickers, liquidity_filter  # noqa: E402
 
 RUNS = ROOT / "runs"
 FORMULAS = ROOT / "formulas"
@@ -63,7 +63,7 @@ def main():
         print("no formulas to scan")
         return
 
-    tickers = sp500() if args.universe == "sp500" else []
+    tickers = get_universe_tickers(args.universe)
     print(f"=== run_scans: {len(formulas)} formula(s) | universe={args.universe} "
           f"({len(tickers)} tickers) | window {start} -> {end} ===", flush=True)
 
