@@ -44,6 +44,20 @@ timeframe_score_weights:
 # Filter band still used by the rsi sub-score if anyone re-enables it.
 rsi_band: [40, 70]
 
+# Event-entry + trade management (see base_breakout_v1.yaml for full notes).
+# mode="event" gates entry on a volume-confirmed break; stops give the R:R.
+backtest:
+  mode: event
+  vol_confirm_mult: 1.5
+  event_lookback: 55             # matches breakout_lookback (55-day high)
+  event_vol_lookback: 60
+  event_window_bars: 5
+  atr_stop_mult: 2.0
+  atr_stop_period: 14
+  trailing_stop_pct: 0.06
+  trailing_activate_pct: 0.05
+  time_stop_bars: 15
+
 # Pre-breakout is a short-horizon setup; daily dominates.
 timeframe_weights:
   daily: 0.70

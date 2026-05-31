@@ -61,13 +61,21 @@ def load_regimes() -> list[dict]:
 
 
 def cfg_for(formula_raw: dict) -> bt.BacktestConfig:
-    """Match the BacktestConfig used in auto_tune / run.py defaults."""
-    return bt.BacktestConfig(
+    """Regime-backtest defaults, with any formula `backtest:` block overlaid on
+    top (so the breakout formulas run in event mode here too)."""
+    import dataclasses
+    cfg = bt.BacktestConfig(
         top_n=20, rebalance="W-FRI",
         atr_stop_mult=2.0, trailing_stop_pct=0.06,
         trailing_activate_pct=0.05, time_stop_bars=15,
         benchmark_ticker="SPY",
     )
+    blk = formula_raw.get("backtest") or {}
+    valid = {fld.name for fld in dataclasses.fields(bt.BacktestConfig)}
+    for k, v in blk.items():
+        if k in valid:
+            setattr(cfg, k, v)
+    return cfg
 
 
 def classify_current_regime(data: dict[str, pd.DataFrame]) -> dict:
