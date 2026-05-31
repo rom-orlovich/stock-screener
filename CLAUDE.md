@@ -92,7 +92,7 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
   verdict (HONEST, `scripts/validate_managed_path.py`, full sp500 × {2023→now,
   2018→now, bull_2021, bear_2022, ai_2023_2024} × 3 modes, parallel=3):** managed
   is the FIRST mode with real R:R asymmetry — **payoff 1.21–1.45** (highest of the
-  3 modes in 9/10 cells; vs event ~1.0–1.18, reb ~0.9–1.18), losers cut ~8 bars vs
+  3 modes in all 10 cells; vs event ~0.85–1.18, reb ~0.93–1.18), losers cut ~8 bars vs
   winners ~12–14, and it **roughly halves event's drawdown** (base full_2023
   −0.134 vs event −0.278). BUT avg hold is only ~2.4–2.6 weeks (capped by
   `time_stop_bars=15`; exits time-dominated — base full_2023 time 709/stop 314/

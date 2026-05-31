@@ -102,17 +102,26 @@ def _job(payload):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--end", default="2026-05-29")
-    ap.add_argument("--parallel", type=int, default=12)
+    ap.add_argument("--parallel", type=int, default=3,
+                    help="worker processes (keep low; >4 can wedge a small box)")
+    ap.add_argument("--regimes", default="bull_2021,bear_2022,ai_2023_2024",
+                    help="comma-separated regime names to include (empty = none, "
+                         "'all' = every regime in regimes.json)")
     ap.add_argument("--out", default=str(ROOT / "runs" / "managed_validation.json"))
     args = ap.parse_args()
     os.environ.setdefault("USE_VECTORIZED_SCORING", "1")
 
     regimes = json.loads((ROOT / "regimes.json").read_text())["regimes"]
+    want = set() if not args.regimes else (
+        {r["name"] for r in regimes} if args.regimes == "all"
+        else set(args.regimes.split(",")))
     windows = [
         {"name": "full_2023_to_now", "kind": "full", "start": "2023-01-01", "end": args.end},
         {"name": "full_2018_to_now", "kind": "full", "start": "2018-01-01", "end": args.end},
     ]
     for r in regimes:
+        if r["name"] not in want:
+            continue
         end = min(r.get("end") or args.end, args.end)
         windows.append({"name": r["name"], "kind": r["kind"], "start": r["start"], "end": end})
 
