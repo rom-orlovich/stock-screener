@@ -77,6 +77,31 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-05-31** — feat: **`mode="managed"`** (`engine/backtest._run_managed` +
+  helpers `_resolve_exit_levels`/`_build_precompute`/`_ranked_at`) — decoupled
+  bar-by-bar hold. Positions persist across W-FRI bars, managed on every daily bar
+  (stop/trail/tp/time, arithmetic mirrored byte-for-byte from
+  `_period_return_with_exits`) until an exit fires; freed slots refill from the
+  event-confirmed ranking. Gated by `cfg.mode=="managed"` at the top of `run()` so
+  rebalance/event stay **bit-identical** (golden re-checked; I deliberately did NOT
+  refactor the shared exit/numba path — parity is sacred — managed *mirrors* it in
+  a separate stepper, proven by `test_stepper_parity`). Produces **real round-trip
+  trades** with a `bars_held` column (~1/3 the position-week count). Equity sampled
+  weekly (n_per_year=52 unchanged); cost charged once per round-trip. Wired into
+  `run.py --mode managed`. Tests: `scripts/test_managed_path.py`. **Validation
+  verdict (HONEST, `scripts/validate_managed_path.py`, full sp500 × {2023→now,
+  2018→now, bull_2021, bear_2022, ai_2023_2024} × 3 modes, parallel=3):** managed
+  is the FIRST mode with real R:R asymmetry — **payoff 1.21–1.45** (highest of the
+  3 modes in 9/10 cells; vs event ~1.0–1.18, reb ~0.9–1.18), losers cut ~8 bars vs
+  winners ~12–14, and it **roughly halves event's drawdown** (base full_2023
+  −0.134 vs event −0.278). BUT avg hold is only ~2.4–2.6 weeks (capped by
+  `time_stop_bars=15`; exits time-dominated — base full_2023 time 709/stop 314/
+  trail 92), event still wins **total return** outright (base full_2023 +1.03 vs
+  +0.65), alpha stays negative on long windows, and sharpe is a wash (managed wins
+  full windows + ai, loses clean bull_2021 to weekly reload). A better-shaped,
+  lower-DD, lower-return system — not a free lunch. YAML `mode:` left at `event`.
+  Next lever = raise/drop `time_stop_bars` to let winners truly run. See
+  `/tmp/managed_RESULT.md`. Not pushed/merged.
 - **2026-05-31** — feat: event-entry path. `BacktestConfig.mode`
   (`rebalance` default / `event`), `_breakout_event_fired` (causal,
   vectorized: `close > prior-N high` AND `volume >= k*avg`, trailing
