@@ -517,6 +517,10 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
     state = collect_state()
     state_formulas = (state or {}).get("formulas", {}) or {}
 
+    # Regime presets are shared across formulas; load once. The per-strategy
+    # period selector clamps these to each curve's own date range client-side.
+    regime_presets = _regime_presets()
+
     out: dict[str, dict] = {}
     for formula, items in indexed.items():
         # Daily picks come from the LATEST run's trades CSV (operationally the
@@ -586,10 +590,35 @@ def collect_strategy_histories(indexed: dict) -> dict[str, dict]:
             "equity_curve": equity_curve,
             "benchmark_curve": benchmark_curve,
             "equity_source": latest_equity_fp.name if latest_equity_fp.exists() else None,
+            "regimes": regime_presets,
             "scan_rows": scan_rows,
             "scan_source": scan_fp.name if scan_fp else None,
             "scan_stamp": scan_stamp,
         }
+    return out
+
+
+def _regime_presets() -> list[dict]:
+    """Lightweight regime list (name/label/start/end/kind) for the per-strategy
+    period selector. Sourced from runs/regime_matrix.json; empty if absent.
+    The selector clamps each regime to the strategy's own curve range and hides
+    presets with no overlap, so this can safely list every defined regime."""
+    fp = RUNS / "regime_matrix.json"
+    if not fp.exists():
+        return []
+    try:
+        payload = json.loads(fp.read_text())
+    except Exception:
+        return []
+    out = []
+    for r in payload.get("regimes") or []:
+        out.append({
+            "name": r.get("name", ""),
+            "label": r.get("label", ""),
+            "start": r.get("start", ""),
+            "end": r.get("end", ""),
+            "kind": r.get("kind", ""),
+        })
     return out
 
 
@@ -1355,6 +1384,69 @@ STRATEGY_HTML_TEMPLATE = r"""<!doctype html>
       </div>
     </div>
 
+    <div class="card p-5" id="period-card">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Performance by period</h2>
+          <p class="text-xs text-slate-500 mt-1">Slice the stored equity curve to any window — pick a market regime preset or a custom date range. Return, Sharpe, max drawdown and volatility are recomputed client-side from the curve (no re-backtest); win-rate and trade count come from trades <em>entered</em> within the window.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div>curve <span id="period-range">—</span></div>
+          <div><span id="period-points">0</span> points in window</div>
+        </div>
+      </div>
+
+      <div id="period-presets" class="flex flex-wrap gap-2 mt-3"></div>
+
+      <div class="flex items-end gap-3 mt-3 flex-wrap text-sm">
+        <label class="flex flex-col text-xs text-slate-400">From
+          <input id="period-from" type="date" class="bg-[#0b0f1a] border border-white/10 px-2 py-1 rounded mt-1 text-slate-200" />
+        </label>
+        <label class="flex flex-col text-xs text-slate-400">To
+          <input id="period-to" type="date" class="bg-[#0b0f1a] border border-white/10 px-2 py-1 rounded mt-1 text-slate-200" />
+        </label>
+        <button id="period-reset" class="text-xs text-sky-300 hover:underline pb-1">reset to full</button>
+      </div>
+
+      <div class="rm-grid mt-4">
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Strategy return</div>
+          <div class="text-lg num" id="pst-return">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">SPY return</div>
+          <div class="text-lg num" id="pst-spy">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Alpha (excess vs SPY)</div>
+          <div class="text-lg num" id="pst-alpha">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Sharpe (annualized)</div>
+          <div class="text-lg num" id="pst-sharpe">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Max drawdown</div>
+          <div class="text-lg num text-rose-400" id="pst-dd">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Volatility (annualized)</div>
+          <div class="text-lg num" id="pst-vol">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Win rate <span class="text-slate-500">(trades entered)</span></div>
+          <div class="text-lg num" id="pst-win">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Trades in window</div>
+          <div class="text-lg num" id="pst-trades">—</div>
+        </div>
+      </div>
+
+      <div class="chart-box mt-4" style="height: 320px; max-height: 320px;"><canvas id="period-chart"></canvas></div>
+      <p class="text-xs text-slate-500 mt-2">Both curves are re-based to 1.0 at the start of the selected window so the period's relative performance is directly comparable.</p>
+    </div>
+
     <div class="card p-5">
       <div class="flex items-baseline justify-between flex-wrap gap-3">
         <div>
@@ -1558,6 +1650,7 @@ async function load() {
   renderTradingRules(data);
   renderRiskMetrics(data);
   renderTimeline(data);
+  renderPeriodExplorer(data);
   renderEquityCurve(data);
   renderScan(data);
   renderTickerJourney(data);
@@ -1916,6 +2009,205 @@ function renderTimeline(data) {
         x: { ticks: { color: '#64748b', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' }},
         y:  { position: 'left',  ticks: { color: '#60a5fa' }, grid: { color: 'rgba(255,255,255,0.04)' }, title: { text: 'Sharpe', display: true, color: '#60a5fa' }},
         y1: { position: 'right', ticks: { color: '#5fe6a2', callback: v => (v*100).toFixed(0)+'%' }, grid: { drawOnChartArea: false }, title: { text: 'Return / |DD|', display: true, color: '#5fe6a2' }},
+      }
+    }
+  });
+}
+
+let _periodChart = null;
+let _periodState = { eq: [], bench: [], picks: [], regimes: [] };
+
+function renderPeriodExplorer(data) {
+  const eq = data.equity_curve || [];
+  const bench = data.benchmark_curve || [];
+  const picks = data.picks_by_date || [];
+  const regimes = data.regimes || [];
+  _periodState = { eq, bench, picks, regimes };
+
+  const card = document.getElementById('period-card');
+  if (eq.length < 2) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+
+  const minD = eq[0].date, maxD = eq[eq.length - 1].date;
+  document.getElementById('period-range').textContent = `${minD} → ${maxD}`;
+  const fromI = document.getElementById('period-from');
+  const toI = document.getElementById('period-to');
+  fromI.min = minD; fromI.max = maxD; fromI.value = minD;
+  toI.min = minD; toI.max = maxD; toI.value = maxD;
+
+  // Presets: "Full" + every regime, clamped to the curve range. A regime that
+  // doesn't overlap the curve is shown disabled rather than hidden, so it's
+  // clear the data simply doesn't reach that far back.
+  const presets = [{ name: 'full', label: 'Full', start: minD, end: maxD, overlap: true }];
+  regimes.forEach(r => {
+    const overlap = !(r.end < minD || r.start > maxD);
+    presets.push({
+      name: r.name, label: r.label, kind: r.kind, overlap,
+      start: r.start > minD ? r.start : minD,
+      end: r.end < maxD ? r.end : maxD,
+    });
+  });
+
+  const wrap = document.getElementById('period-presets');
+  wrap.innerHTML = presets.map((p, i) => {
+    const cls = p.overlap
+      ? 'period-preset pill pill-gray hover:bg-sky-900/40 cursor-pointer'
+      : 'period-preset pill pill-gray opacity-40 cursor-not-allowed';
+    return `<button data-i="${i}" ${p.overlap ? '' : 'disabled'} class="${cls}" title="${p.start} → ${p.end}">${p.label}${p.overlap ? '' : ' · no data'}</button>`;
+  }).join('');
+
+  function highlight(btn) {
+    wrap.querySelectorAll('button.period-preset').forEach(x => { x.classList.remove('pill-green'); x.classList.add('pill-gray'); });
+    if (btn) { btn.classList.remove('pill-gray'); btn.classList.add('pill-green'); }
+  }
+  wrap.querySelectorAll('button.period-preset').forEach(b => {
+    if (b.disabled) return;
+    b.onclick = () => {
+      const p = presets[Number(b.dataset.i)];
+      fromI.value = p.start; toI.value = p.end;
+      highlight(b);
+      updatePeriod();
+    };
+  });
+
+  fromI.onchange = () => { highlight(null); updatePeriod(); };
+  toI.onchange = () => { highlight(null); updatePeriod(); };
+  document.getElementById('period-reset').onclick = () => {
+    fromI.value = minD; toI.value = maxD;
+    highlight(wrap.querySelector('button.period-preset[data-i="0"]'));
+    updatePeriod();
+  };
+
+  highlight(wrap.querySelector('button.period-preset[data-i="0"]'));
+  updatePeriod();
+}
+
+// Periods-per-year inferred from the median spacing of the slice (weekly ≈ 52,
+// monthly ≈ 12), so Sharpe/vol annualize correctly regardless of rebalance freq.
+function _periodsPerYear(slice) {
+  if (slice.length < 2) return 52;
+  const gaps = [];
+  for (let i = 1; i < slice.length; i++) {
+    const d0 = new Date(slice[i - 1].date), d1 = new Date(slice[i].date);
+    const g = (d1 - d0) / 86400000;
+    if (g > 0) gaps.push(g);
+  }
+  if (!gaps.length) return 52;
+  gaps.sort((a, b) => a - b);
+  const med = gaps[Math.floor(gaps.length / 2)] || 7;
+  return med > 0 ? 365.25 / med : 52;
+}
+
+function _curveStats(slice) {
+  if (slice.length < 2) return null;
+  const first = slice[0].value, last = slice[slice.length - 1].value;
+  const totalReturn = first ? last / first - 1 : null;
+  let peak = -Infinity, maxdd = 0;
+  for (const p of slice) {
+    if (p.value > peak) peak = p.value;
+    const dd = peak ? p.value / peak - 1 : 0;
+    if (dd < maxdd) maxdd = dd;
+  }
+  const rets = [];
+  for (let i = 1; i < slice.length; i++) {
+    const prev = slice[i - 1].value;
+    if (prev) rets.push(slice[i].value / prev - 1);
+  }
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length > 1 ? rets.length - 1 : 1);
+  const sd = Math.sqrt(variance);
+  const ppy = _periodsPerYear(slice);
+  return {
+    totalReturn, maxdd,
+    sharpe: sd ? (mean / sd) * Math.sqrt(ppy) : null,
+    vol: sd * Math.sqrt(ppy),
+    n: slice.length,
+  };
+}
+
+function _sliceCurve(curve, from, to) {
+  return curve.filter(p => p.date >= from && p.date <= to);
+}
+
+function updatePeriod() {
+  const from = document.getElementById('period-from').value;
+  const to = document.getElementById('period-to').value;
+  const { eq, bench, picks } = _periodState;
+  const $ = id => document.getElementById(id);
+  const eqSlice = _sliceCurve(eq, from, to);
+  const benchSlice = _sliceCurve(bench, from, to);
+  $('period-points').textContent = eqSlice.length;
+
+  const ids = ['pst-return', 'pst-spy', 'pst-alpha', 'pst-sharpe', 'pst-dd', 'pst-vol', 'pst-win', 'pst-trades'];
+  if (eqSlice.length < 2) {
+    ids.forEach(id => { $(id).textContent = '—'; });
+    drawPeriodChart([], []);
+    return;
+  }
+
+  const cs = _curveStats(eqSlice);
+  const bs = _curveStats(benchSlice);
+  const benchRet = bs ? bs.totalReturn : null;
+  const alpha = (benchRet == null) ? null : cs.totalReturn - benchRet;
+
+  let n = 0, wins = 0;
+  picks.forEach(d => {
+    if (d.date >= from && d.date <= to) {
+      d.picks.forEach(p => { n++; if (p.ret > 0) wins++; });
+    }
+  });
+
+  $('pst-return').textContent = fmtPctSigned(cs.totalReturn);
+  $('pst-return').className = 'text-lg num ' + (cs.totalReturn >= 0 ? 'text-emerald-400' : 'text-rose-400');
+  $('pst-spy').textContent = benchRet == null ? '—' : fmtPctSigned(benchRet);
+  $('pst-alpha').textContent = alpha == null ? '—' : fmtPctSigned(alpha);
+  $('pst-alpha').className = 'text-lg num ' + (alpha >= 0 ? 'text-emerald-400' : 'text-rose-400');
+  $('pst-sharpe').textContent = fmtNum(cs.sharpe);
+  $('pst-dd').textContent = fmtPct(cs.maxdd);
+  $('pst-vol').textContent = fmtPct(cs.vol);
+  $('pst-win').textContent = n ? (wins / n * 100).toFixed(1) + '%' : '—';
+  $('pst-trades').textContent = n;
+
+  drawPeriodChart(eqSlice, benchSlice);
+}
+
+function drawPeriodChart(eqSlice, benchSlice) {
+  const ctx = document.getElementById('period-chart').getContext('2d');
+  if (_periodChart) { try { _periodChart.destroy(); } catch (e) {} _periodChart = null; }
+  if (eqSlice.length < 2) {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px ui-sans-serif, system-ui';
+    ctx.fillText('Selected window has too few points to plot.', 12, 24);
+    return;
+  }
+  const base = eqSlice[0].value || 1;
+  const labels = eqSlice.map(p => p.date);
+  const stratData = eqSlice.map(p => p.value / base);
+  const benchByDate = new Map(benchSlice.map(p => [p.date, p.value]));
+  const bBase = benchSlice.length ? benchSlice[0].value : null;
+  const benchData = labels.map(d => (benchByDate.has(d) && bBase) ? benchByDate.get(d) / bBase : null);
+
+  _periodChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Strategy', data: stratData, borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.08)', tension: 0.15, borderWidth: 2, pointRadius: 0, fill: true },
+        { label: 'SPY (benchmark)', data: benchData, borderColor: '#94a3b8', borderDash: [5, 4], tension: 0.15, borderWidth: 1.5, pointRadius: 0, fill: false },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8' } },
+        title: { display: true, text: 'Re-based to 1.0 at window start', color: '#cbd5e1', font: { size: 12, weight: 'normal' } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${Number(c.parsed.y).toFixed(3)}×` } },
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { ticks: { color: '#94a3b8', callback: v => Number(v).toFixed(2) + '×' }, grid: { color: 'rgba(255,255,255,0.04)' } },
       }
     }
   });

@@ -93,6 +93,7 @@ python dashboard.py && python -m http.server -d docs 8000</code></pre>
             <th class="text-right">Win%</th>
             <th class="text-right">Trades</th>
             <th class="text-right">vs SPY</th>
+            <th class="text-right" title="Pearson correlation: score vs realised return. &gt;0.05 reliable, &lt;0 inverted signal">Predict</th>
             <th class="text-right">Window</th>
           </tr>
         </thead>
@@ -218,6 +219,7 @@ function renderLeaderboard(data) {
       <td class="text-right">${fmtPct(s.stats.win_rate)}</td>
       <td class="text-right text-slate-400">${s.stats.n_trades || s.trades_total || 0}</td>
       <td class="text-right ${alpha > 0 ? 'text-emerald-400' : 'text-rose-400'}">${fmtPct(alpha)}</td>
+      <td class="text-right ${s.corr_pearson == null ? 'text-slate-500' : (s.corr_pearson > 0.05 ? 'text-emerald-400' : (s.corr_pearson < 0 ? 'text-rose-400' : 'text-slate-400'))}" title="Pearson corr(score, ret)">${s.corr_pearson == null ? '—' : Number(s.corr_pearson).toFixed(3)}</td>
       <td class="text-right text-xs text-slate-500">${s.start || '—'}<br>${s.end || '—'}</td>`;
     lb.appendChild(tr);
   });
