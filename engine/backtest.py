@@ -103,6 +103,13 @@ class BacktestConfig:
     # New: time stop in daily bars since entry (0 = disabled).
     time_stop_bars: int = 0
 
+    # Managed-mode only: risk-based position sizing. 0 = equal-weight (legacy,
+    # ~equity/top_n per name). >0 sizes each entry so the distance to its stop
+    # (entry - stop_lvl, set by the ATR/flat stop) risks this fraction of current
+    # equity; the size is still capped at the equal-weight target so the book
+    # stays diversified. Rebalance/event paths ignore this (parity is sacred).
+    risk_per_trade: float = 0.0
+
     benchmark_ticker: str = "SPY"  # buy-and-hold ref over the same window.
 
     # Event-entry mode. "rebalance" (default) is the legacy path and MUST stay
@@ -522,7 +529,8 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
         if free <= 0:
             return
         ranked = _ranked_at(price_data, f, t, cfg, ctx)
-        target = (_mv(t) / cfg.top_n) if cfg.top_n else 0.0
+        mv = _mv(t)
+        target = (mv / cfg.top_n) if cfg.top_n else 0.0
         added = 0
         for tkr, sc in ranked:
             if added >= free:
@@ -536,10 +544,18 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
             if pd.isna(px) or float(px) <= 0:
                 continue
             entry = float(px)
-            deploy = min(target, cash)
+            stop_lvl, tp_lvl, trail_arm_lvl = _resolve_exit_levels(price_data[tkr], t, entry, cfg)
+            # Risk-based sizing: budget cfg.risk_per_trade of equity to the stop
+            # distance, capped at the equal-weight target. risk_per_trade=0 (or no
+            # stop) -> equal weight, byte-identical to the legacy managed path.
+            size = target
+            if cfg.risk_per_trade > 0.0 and stop_lvl is not None and entry > stop_lvl:
+                risk_frac = (entry - stop_lvl) / entry
+                if risk_frac > 0.0:
+                    size = min(target, mv * cfg.risk_per_trade / risk_frac)
+            deploy = min(size, cash)
             if deploy <= 1e-12:
                 break
-            stop_lvl, tp_lvl, trail_arm_lvl = _resolve_exit_levels(price_data[tkr], t, entry, cfg)
             cash -= deploy
             positions[tkr] = {
                 "entry_price": entry, "entry_date": t, "capital0": deploy * (1.0 - cost),

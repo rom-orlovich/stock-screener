@@ -106,7 +106,12 @@ def _build_tf(df: pd.DataFrame, specs: set[tuple[str, int]]) -> dict:
                     series[(name, period)] = atr_mod.avg_volume(df, period)
                 except Exception:  # noqa: BLE001
                     pass
-    return {"df": df, "close": close, "high": high, "low": low, "series": series}
+    out = {"df": df, "close": close, "high": high, "low": low, "series": series}
+    # gap is OHLC-direct (no period) — compute once here, mirroring _compute's
+    # `out["gap"] = (open - close.shift(1)) / close.shift(1)` under the same guard.
+    if has_ohlc:
+        out["gap"] = (df["open"] - close.shift(1)) / close.shift(1)
+    return out
 
 
 def build_bank(daily: pd.DataFrame, specs: set[tuple[str, int]]) -> dict:
@@ -155,6 +160,9 @@ def _assemble_tf(tf_bank: dict, cfg: dict) -> dict:
     }
     # Optional keys: present only if the bank computed them (OHLC/volume guards),
     # exactly mirroring _compute, where a failed/guarded indicator leaves the key out.
+    g = tf_bank.get("gap")
+    if g is not None:
+        out["gap"] = g
     ap = s.get(("atr_pct", cfg.get("atr_period", _ATR_DEFAULT)))
     if ap is not None:
         out["atr_pct"] = ap

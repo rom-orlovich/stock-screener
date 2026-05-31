@@ -1,0 +1,122 @@
+# leading_stock_v1 — a "market leader" hunter (O'Neil / Minervini SEPA flavour).
+# Composes existing sub-scores; the only new code it needs is the `gap` sub-score
+# (engine/score.py) and managed-mode `risk_per_trade` sizing (engine/backtest.py).
+#
+# The thesis, mapped to mechanics:
+#   RS-rank ............ multi-timeframe `momentum` (the engine ranks by score and
+#                        takes top_n, so a high momentum score == high relative
+#                        strength vs the universe).
+#   trend-gate ......... Stage-2 only: `trend` weight + `trend_gate_quietness`
+#                        (quietness terms count only when px > sma_slow(200)).
+#   52wk-high .......... `breakout` proximity with breakout_lookback=252.
+#   overextension ...... `breakout_thrust` rewards 0-3% above the pivot and fades
+#                        to 0 by ~6% — i.e. buy the break, never chase the gap.
+#   pullback-to-support  `rsi` band [40,80]: reward healthy-but-not-blown-off RSI,
+#                        penalise <40 (no support) and the extreme highs.
+#   gaps ............... `gap` sub-score (accumulation gap-ups in a band).
+#   breakout-event ..... backtest.mode managed -> only enters names with a
+#                        volume-confirmed break (close > prior-N high, vol >= k*avg).
+#   managed mode ....... positions decouple from the W-FRI grid; managed daily.
+#   risk-based sizing .. backtest.risk_per_trade: size so (entry-stop) risks a
+#                        fixed fraction of equity (ATR stop sets the distance).
+#   let-winners-run .... wide trailing stop + time_stop_bars tested at 40 and 0.
+version: leading_stock_v1
+direction: long
+
+indicators:
+  rsi_period: 14
+  sma_fast: 50
+  sma_slow: 200                  # Stage-2 trend filter
+  momentum_lookback: 126         # ~6-month relative strength
+  breakout_lookback: 252         # proximity to the 52-week high
+
+  # overextension fade band (breakout_thrust): reward the early break, fade chasers
+  breakout_thrust_band_lo: 0.00
+  breakout_thrust_band_hi: 0.03
+  breakout_thrust_fade: 0.06
+
+  # gap sub-score: reward a recent accumulation gap-up inside a band, fade exhaustion
+  gap_lookback: 10               # look back N bars for the largest up-gap
+  gap_band_lo: 0.02              # >= 2% gap starts to score
+  gap_band_hi: 0.05              # 2-5% gap is the sweet spot (peak 1.0)
+  gap_fade: 0.12                 # fade to 0 by ~12% (blow-off / exhaustion gap)
+
+  # tight-base confirmation (small weight)
+  atr_period: 14
+  atr_contraction_lookback: 30
+  atr_contraction_threshold: 0.30
+  vol_short_lookback: 20
+  vol_long_lookback: 60
+  vol_dryup_threshold: 0.80
+  bb_period: 20
+  bb_squeeze_lookback: 60
+  bb_squeeze_percentile: 0.20
+
+  trend_gate_quietness: true     # quietness terms only count above sma_slow
+
+# RS + the break carry the score; gap + trend + pivot-proximity confirm; one
+# quietness term (atr_contraction) rewards a tight base before the break.
+timeframe_score_weights:
+  momentum: 0.28                 # relative strength (core)
+  trend: 0.18                    # Stage-2 uptrend
+  rsi: 0.05                      # healthy, pullback-friendly band
+  breakout: 0.17                 # proximity to 52-week high
+  breakout_thrust: 0.17          # the early break itself (anti-chase)
+  gap: 0.10                      # accumulation gap-up
+  atr_contraction: 0.05          # tight base
+  volume_dryup: 0.00
+  bb_squeeze: 0.00
+  volatility: 0.00
+
+rsi_band: [40, 80]
+
+# Event-confirmed managed mode. Read by bt.config_from_formula.
+backtest:
+  mode: managed
+  vol_confirm_mult: 1.5          # entry break must clear 1.5 * avg volume
+  event_lookback: 50            # break of the prior-50-bar high triggers entry
+  event_vol_lookback: 60
+  event_window_bars: 5
+  atr_stop_mult: 2.5             # give leaders room: stop = entry - 2.5*ATR(14)
+  atr_stop_period: 14
+  trailing_stop_pct: 0.10        # let winners run — trail 10% off the peak
+  trailing_activate_pct: 0.10
+  time_stop_bars: 40             # A/B'd against 0 (no time cap) in validation
+  risk_per_trade: 0.01           # size each position to risk 1% of equity to its stop
+  top_n: 10
+  cost_bps: 5.0
+
+# Leaders are a medium-horizon play — daily-weighted for the entry, weekly/monthly
+# for the trend backdrop.
+timeframe_weights:
+  daily: 0.50
+  weekly: 0.35
+  monthly: 0.15
+
+alignment_bonus: 0.10
+
+bounds:
+  rsi_period: [7, 28]
+  sma_fast: [20, 80]
+  sma_slow: [150, 300]
+  momentum_lookback: [60, 200]
+  breakout_lookback: [120, 300]
+  breakout_thrust_band_lo: [0.00, 0.02]
+  breakout_thrust_band_hi: [0.02, 0.06]
+  breakout_thrust_fade: [0.04, 0.10]
+  gap_lookback: [5, 20]
+  gap_band_lo: [0.01, 0.03]
+  gap_band_hi: [0.03, 0.08]
+  gap_fade: [0.08, 0.20]
+  atr_period: [7, 28]
+  atr_contraction_lookback: [15, 60]
+  atr_contraction_threshold: [0.15, 0.50]
+  vol_short_lookback: [10, 40]
+  vol_long_lookback: [30, 120]
+  vol_dryup_threshold: [0.50, 0.90]
+  bb_period: [10, 30]
+  bb_squeeze_lookback: [30, 120]
+  bb_squeeze_percentile: [0.05, 0.35]
+  alignment_bonus: [0.0, 0.20]
+  rsi_band_low: [30, 50]
+  rsi_band_high: [70, 90]
