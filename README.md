@@ -102,9 +102,9 @@ with `exit: "regime_off"`.
 strategy mixes `trail` + `tp` + `hold`; if 95% is `hold` your exits are
 inactive.
 
-### Entry modes — `rebalance` (default) vs `event`
+### Entry modes — `rebalance` (default) vs `event` vs `managed`
 
-`BacktestConfig.mode` gates how each weekly scan picks names:
+`BacktestConfig.mode` gates how each weekly scan picks names AND how long it holds:
 
 - **`rebalance`** (default, unchanged) — take the top-N ranked names every
   `W-FRI` bar. Bit-identical to the legacy path.
@@ -117,13 +117,26 @@ inactive.
   tight ATR stop + trailing + time stop to get the asymmetric R:R a real
   breakout system needs. Fully causal — `rolling_high` excludes the current bar,
   the volume mean is backward-looking.
+- **`managed`** — event-confirmed entry **plus a hold decoupled from the W-FRI
+  grid** (`_run_managed`). Positions persist across rebalance bars and are
+  managed on *every daily bar* (stop / trail / tp / time, same priority +
+  arithmetic as `_period_return_with_exits`) until an exit fires; freed slots
+  refill at rebalance bars from the event-confirmed ranking. This is the fix
+  `event` couldn't deliver: on the weekly grid every trade is force-closed at
+  the next Friday (~5 bars) so trailing/time never fire — here they can.
+  Produces **real round-trip trades** (a multi-week winner = ONE trade, with a
+  `bars_held` column), so win-rate / payoff / avg-hold are honest. Two
+  deliberate book-keeping differences (documented in `engine/backtest.py`):
+  equity is still sampled weekly (`_stats` n_per_year=52 unchanged) and
+  round-trip cost is charged once per entry, not on the whole book every week.
 
 Carry mode + event params + exits in the formula YAML under a `backtest:` block
 (`engine.backtest.config_from_formula` reads it; `run.py --mode` and
 `run_regimes.py` honor it). Only the two breakout YAMLs set `mode: event`.
-Validate with `scripts/validate_event_path.py` (3-way ablation:
-`rebalance_nostop` / `rebalance_stop` / `event_stop`, full window + regimes,
-reports W/L asymmetry). Unit tests: `scripts/test_event_path.py`.
+Validate event mode with `scripts/validate_event_path.py`; validate managed mode
+(3-way `rebalance` / `event` / `managed`, full 2023→now + 2018→now + regimes,
+reports W/L asymmetry + avg-hold) with `scripts/validate_managed_path.py`. Unit
+tests: `scripts/test_event_path.py`, `scripts/test_managed_path.py`.
 
 ---
 

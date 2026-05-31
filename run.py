@@ -138,9 +138,11 @@ def main():
     b.add_argument("--end", required=True)
     b.add_argument("--top-n", type=int, default=5)
     b.add_argument("--rebalance", default="W-FRI")
-    b.add_argument("--mode", choices=("rebalance", "event"), default=None,
-                   help="entry mode; overrides the formula's backtest.mode "
-                        "(default: rebalance unless the YAML sets event)")
+    b.add_argument("--mode", choices=("rebalance", "event", "managed"), default=None,
+                   help="entry mode; overrides the formula's backtest.mode. "
+                        "'managed' = decoupled bar-by-bar hold (positions persist "
+                        "across rebalances, exits managed daily). Default: rebalance "
+                        "unless the YAML sets one.")
     # Exit flags default to None so they don't clobber a formula's backtest:
     # block — pass one explicitly to override. Unset everywhere -> no stops.
     b.add_argument("--stop-loss", type=float, default=None,

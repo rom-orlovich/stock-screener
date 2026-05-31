@@ -38,10 +38,14 @@ run.py ──► engine.backtest.run() ──► engine.score.score_ticker()
                 │    absolute_momentum block)
                 │
                 ├── _breakout_event_fired()
-                │   (only when cfg.mode=="event": filters ranked
-                │    picks to volume-confirmed breaks; W-FRI cadence)
+                │   (only when cfg.mode in {"event","managed"}:
+                │    filters ranked picks to volume-confirmed breaks)
                 │
-                └── _period_return_with_exits()
+                ├── _run_managed()  (only when cfg.mode=="managed":
+                │   decoupled bar-by-bar hold; positions persist across
+                │   rebalances; daily exits; slots refilled at rebalances)
+                │
+                └── _period_return_with_exits()  (rebalance/event only)
                     (stop / trail / tp / time / hold)
 
 auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
@@ -131,6 +135,13 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Known issues / TODO
 
+- **DONE (2026-05-31)** — decoupled hold (`mode="managed"`, `_run_managed`):
+  the "manage bar-by-bar across weeks" lever the event-path note called out as
+  out-of-scope. Positions persist across W-FRI bars, managed daily until a
+  stop/trail/tp/time exit fires; freed slots refill from the event ranking.
+  First mode to produce real R:R asymmetry (payoff ~1.3–1.5 in up regimes) +
+  lower drawdown, at the cost of raw return. `scripts/validate_managed_path.py`
+  (3-way), `scripts/test_managed_path.py`. See Recent changes / `/tmp/managed_RESULT.md`.
 - **DONE (2026-05-31)** — event-driven entry is implemented:
   `BacktestConfig.mode` (`"rebalance"` default / `"event"`), gated so the
   rebalance path stays bit-identical. Per decision Q1 the event detector
