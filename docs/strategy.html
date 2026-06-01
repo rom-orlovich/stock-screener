@@ -18,6 +18,10 @@
   table.compact td, table.compact th { padding: 4px 8px; }
   .chart-box { position: relative; height: 280px; max-height: 280px; width: 100%; }
   .scroll-box { max-height: 360px; overflow-y: auto; }
+  .rules-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+  .rm-grid    { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  @media (max-width: 900px) { .rules-grid { grid-template-columns: 1fr; } .rm-grid { grid-template-columns: repeat(2, minmax(0,1fr)); } }
+  @media (max-width: 540px) { .rm-grid { grid-template-columns: 1fr; } }
   .delta-up   { color: #5fe6a2; }
   .delta-down { color: #ff7a8a; }
   details > summary { cursor: pointer; list-style: none; }
@@ -45,9 +49,101 @@
 
     <div class="card p-5">
       <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Trading rules — how this strategy actually trades</h2>
+          <p class="text-xs text-slate-500 mt-1">Reading the YAML &amp; <code>BacktestConfig</code> in plain English: when does it enter, when does it exit, what does it cost?</p>
+        </div>
+      </div>
+
+      <div class="rules-grid mt-4">
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Entry signal</div>
+          <div class="text-sm" id="tr-entry">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Holding period</div>
+          <div class="text-sm" id="tr-holding">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Stops &amp; exits <span class="text-slate-500 normal-case">(priority: stop → trail → tp → time)</span></div>
+          <table class="w-full text-xs mt-1"><tbody id="tr-stops"></tbody></table>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Costs assumed · Benchmark</div>
+          <div class="text-sm" id="tr-costs">—</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Risk metrics — from every trade in the latest backtest</h2>
+          <p class="text-xs text-slate-500 mt-1">The questions traders care about: do wins outpace losses, how brutal is the worst streak, what's the realistic expectancy per trade?</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">based on <span id="rm-ntrades">0</span> trades</div>
+      </div>
+
+      <div class="card p-4 mt-4" id="wl-card" style="background:#0f1626">
+        <div class="text-xs uppercase tracking-wide text-slate-400 mb-1">Win / Loss ratio (avg win ÷ |avg loss|)</div>
+        <div class="flex items-baseline gap-3 flex-wrap">
+          <div class="text-3xl font-bold num" id="rm-wl-ratio">—</div>
+          <div class="text-sm text-slate-400">
+            <span id="rm-wl-pill" class="pill pill-gray">—</span>
+            <span class="text-slate-500 ml-2">avg win <span id="rm-avg-win" class="text-emerald-400 num">—</span>  ·  avg loss <span id="rm-avg-loss" class="text-rose-400 num">—</span></span>
+          </div>
+        </div>
+        <div class="text-xs text-slate-500 mt-2">Rule of thumb: &gt; 1.5 is healthy, 1.0–1.5 is mediocre, &lt; 1.0 means the strategy needs a high win-rate to break even.</div>
+      </div>
+
+      <div class="rm-grid mt-4">
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Win rate</div>
+          <div class="text-lg num" id="rm-winrate">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Profit factor <span class="text-slate-500">(Σ wins / |Σ losses|)</span></div>
+          <div class="text-lg num" id="rm-pf">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Expectancy / trade</div>
+          <div class="text-lg num" id="rm-exp">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Trade σ (ret std)</div>
+          <div class="text-lg num" id="rm-std">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Best trade</div>
+          <div class="text-lg num text-emerald-400" id="rm-best">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Worst trade</div>
+          <div class="text-lg num text-rose-400" id="rm-worst">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Max consecutive losses</div>
+          <div class="text-lg num text-rose-400" id="rm-maxloss">—</div>
+          <div class="text-xs text-slate-500">drawdown-protection signal</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Max consecutive wins</div>
+          <div class="text-lg num text-emerald-400" id="rm-maxwin">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Skew / Kurtosis</div>
+          <div class="text-sm num" id="rm-skew">—</div>
+          <div class="text-xs text-slate-500">positive skew = fat right tail</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
         <h2 class="text-lg font-semibold">Performance timeline</h2>
         <span class="text-xs text-slate-500">Each point = one backtest run. Hover the chart for the run timestamp.</span>
       </div>
+      <p class="text-xs text-slate-500 mt-1">The timeline above plots one dot per historical RUN — it stays empty until the nightly auto-tune accumulates multiple runs. The equity curve below is from the LATEST run only and always populates, even for brand-new strategies.</p>
       <div class="chart-box mt-3"><canvas id="timeline-chart"></canvas></div>
       <div class="overflow-x-auto mt-3">
         <table class="w-full text-sm compact num">
@@ -61,6 +157,155 @@
           </thead>
           <tbody id="timeline-rows"></tbody>
         </table>
+      </div>
+    </div>
+
+    <div class="card p-5" id="period-card">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Performance by period</h2>
+          <p class="text-xs text-slate-500 mt-1">Slice the stored equity curve to any window — pick a market regime preset or a custom date range. Return, Sharpe, max drawdown and volatility are recomputed client-side from the curve (no re-backtest); win-rate and trade count come from trades <em>entered</em> within the window.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div>curve <span id="period-range">—</span></div>
+          <div><span id="period-points">0</span> points in window</div>
+        </div>
+      </div>
+
+      <div id="period-presets" class="flex flex-wrap gap-2 mt-3"></div>
+
+      <div class="flex items-end gap-3 mt-3 flex-wrap text-sm">
+        <label class="flex flex-col text-xs text-slate-400">From
+          <input id="period-from" type="date" class="bg-[#0b0f1a] border border-white/10 px-2 py-1 rounded mt-1 text-slate-200" />
+        </label>
+        <label class="flex flex-col text-xs text-slate-400">To
+          <input id="period-to" type="date" class="bg-[#0b0f1a] border border-white/10 px-2 py-1 rounded mt-1 text-slate-200" />
+        </label>
+        <button id="period-reset" class="text-xs text-sky-300 hover:underline pb-1">reset to full</button>
+      </div>
+
+      <div class="rm-grid mt-4">
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Strategy return</div>
+          <div class="text-lg num" id="pst-return">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">SPY return</div>
+          <div class="text-lg num" id="pst-spy">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Alpha (excess vs SPY)</div>
+          <div class="text-lg num" id="pst-alpha">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Sharpe (annualized)</div>
+          <div class="text-lg num" id="pst-sharpe">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Max drawdown</div>
+          <div class="text-lg num text-rose-400" id="pst-dd">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Volatility (annualized)</div>
+          <div class="text-lg num" id="pst-vol">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Win rate <span class="text-slate-500">(trades entered)</span></div>
+          <div class="text-lg num" id="pst-win">—</div>
+        </div>
+        <div class="card p-3">
+          <div class="text-xs text-slate-400">Trades in window</div>
+          <div class="text-lg num" id="pst-trades">—</div>
+        </div>
+      </div>
+
+      <div class="chart-box mt-4" style="height: 320px; max-height: 320px;"><canvas id="period-chart"></canvas></div>
+      <p class="text-xs text-slate-500 mt-2">Both curves are re-based to 1.0 at the start of the selected window so the period's relative performance is directly comparable.</p>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Equity curve — latest backtest run</h2>
+          <p class="text-xs text-slate-500 mt-1">Each point is the portfolio value if you'd held this strategy's top-20 every week since 2023, starting from $1. Compared against buy-and-hold SPY over the same window.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div>source <span id="equity-source">—</span></div>
+          <div><span id="equity-points">0</span> weekly points</div>
+        </div>
+      </div>
+      <div class="chart-box mt-3" style="height: 360px; max-height: 360px;"><canvas id="equity-chart"></canvas></div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Full ranking — every ticker, scored now</h2>
+          <p class="text-xs text-slate-500 mt-1">From the latest <code>run_scans.py</code> run. Top-N picks are highlighted; everything else lets you check where your candidate sits in the order.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div>scan stamp <span id="scan-stamp">—</span></div>
+          <div>source <span id="scan-source">—</span></div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mt-3 flex-wrap text-sm">
+        <input id="scan-filter" type="text" placeholder="filter ticker (e.g. NVDA, MSFT)" class="bg-[#0b0f1a] border border-white/10 px-3 py-1.5 rounded w-56" />
+        <span class="text-xs text-slate-500">showing <span id="scan-shown">0</span> of <span id="scan-total">0</span></span>
+        <span class="text-xs text-emerald-400">green row = top 20 (held by the strategy this week)</span>
+      </div>
+      <div class="overflow-x-auto mt-3 scroll-box" style="max-height: 480px;">
+        <table class="w-full text-sm compact num">
+          <thead class="text-slate-400 text-left border-b border-white/5 sticky top-0 bg-[#131826]">
+            <tr>
+              <th class="cursor-pointer" data-sort="rank">#</th>
+              <th class="cursor-pointer" data-sort="ticker">Ticker</th>
+              <th class="text-right cursor-pointer" data-sort="score">Score</th>
+              <th class="text-right cursor-pointer" data-sort="daily">Daily</th>
+              <th class="text-right cursor-pointer" data-sort="weekly">Weekly</th>
+              <th class="text-right cursor-pointer" data-sort="monthly">Monthly</th>
+              <th class="text-right">Aligned</th>
+            </tr>
+          </thead>
+          <tbody id="scan-rows"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="card p-5">
+      <div class="flex items-baseline justify-between flex-wrap gap-3">
+        <div>
+          <h2 class="text-lg font-semibold">Ticker journey through time</h2>
+          <p class="text-xs text-slate-500 mt-1">Pick any ticker that appeared in the top-N at least 3× to see when it entered, what rank, what score, and what return it delivered week by week.</p>
+        </div>
+        <div class="text-xs text-slate-400 text-right">
+          <div><span id="journey-count">0</span> tickers eligible</div>
+        </div>
+      </div>
+      <div class="flex items-center gap-3 mt-3 flex-wrap text-sm">
+        <input id="journey-filter" type="text" placeholder="search ticker (e.g. NVDA)" class="bg-[#0b0f1a] border border-white/10 px-3 py-1.5 rounded w-56" />
+        <select id="journey-select" class="bg-[#0b0f1a] border border-white/10 text-sm px-2 py-1 rounded min-w-[16rem]"></select>
+        <span class="text-xs text-slate-500" id="journey-meta">—</span>
+      </div>
+      <div class="grid-2 mt-4" style="display:grid; grid-template-columns: 1fr 1fr; gap: 12px;">
+        <div>
+          <div class="text-xs text-slate-400 mb-1">Score timeline (green = winning week, red = losing week)</div>
+          <div class="chart-box"><canvas id="journey-chart"></canvas></div>
+        </div>
+        <div class="overflow-x-auto scroll-box">
+          <table class="w-full text-sm compact num">
+            <thead class="text-slate-400 text-left border-b border-white/5 sticky top-0 bg-[#131826]">
+              <tr>
+                <th>Date</th>
+                <th class="text-right">Rank</th>
+                <th class="text-right">Score</th>
+                <th class="text-right">P&amp;L next week</th>
+                <th>Exit reason</th>
+                <th>Exit date</th>
+              </tr>
+            </thead>
+            <tbody id="journey-rows"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -175,14 +420,277 @@ async function load() {
   const baseline = data.monthly_baseline || {};
   document.getElementById('subtitle').textContent =
     `${(data.timeline||[]).length} backtest runs · ${(data.picks_by_date||[]).length} rebalance days · `
-    + `${(data.change_log||[]).length} accepted param changes · ${(data.trials||[]).length} auto-tune trials · `
-    + `baseline month ${baseline.month || '—'} (avg composite ${fmtNum(baseline.composite_avg, 3)})`;
+    + `${(data.scan_rows||[]).length} tickers in latest scan · ${(data.change_log||[]).length} accepted param changes · `
+    + `${(data.trials||[]).length} auto-tune trials · baseline month ${baseline.month || '—'} (avg composite ${fmtNum(baseline.composite_avg, 3)})`;
   document.getElementById('content').classList.remove('hidden');
+  renderTradingRules(data);
+  renderRiskMetrics(data);
   renderTimeline(data);
+  renderPeriodExplorer(data);
+  renderEquityCurve(data);
+  renderScan(data);
+  renderTickerJourney(data);
   renderPicks(data);
   renderChangelog(data);
   renderDiffs(data);
   renderTrials(data);
+}
+
+function renderTradingRules(data) {
+  const tr = data.trading_rules || {};
+  const stops = tr.stops || {};
+  const $ = id => document.getElementById(id);
+  $('tr-entry').textContent   = tr.entry_signal   || '—';
+  $('tr-holding').textContent = tr.holding_period || '—';
+
+  const stopLabels = {
+    atr_stop:        'ATR stop',
+    hard_stop_loss:  'Hard stop-loss',
+    trailing_stop:   'Trailing stop',
+    time_stop:       'Time stop',
+    take_profit:     'Take profit',
+  };
+  const order = ['hard_stop_loss', 'atr_stop', 'trailing_stop', 'take_profit', 'time_stop'];
+  $('tr-stops').innerHTML = order.map(k => {
+    const v = stops[k] || 'disabled';
+    const muted = (v === 'disabled');
+    return `<tr class="border-b border-white/5">
+      <td class="text-slate-400 py-1 pr-2">${stopLabels[k]}</td>
+      <td class="py-1 ${muted ? 'text-slate-500' : 'text-slate-200'}">${v}</td>
+    </tr>`;
+  }).join('');
+
+  const bps = tr.cost_per_rebalance_bps;
+  const bench = tr.benchmark || 'SPY';
+  $('tr-costs').innerHTML =
+    `<div><span class="text-slate-400">Cost:</span> <span class="num">${bps == null ? '—' : bps}</span> bps per rebalance`
+    + ` <span class="text-slate-500">(${bps != null ? (bps / 100).toFixed(3) : '—'}% round-trip — covers spread + commission)</span></div>`
+    + `<div class="mt-2"><span class="text-slate-400">Benchmark:</span> <span class="num">${bench}</span></div>`;
+}
+
+function renderRiskMetrics(data) {
+  const m = data.risk_metrics || {};
+  const $ = id => document.getElementById(id);
+  const n = m.n_trades || 0;
+  $('rm-ntrades').textContent = n;
+
+  if (!n) {
+    ['rm-wl-ratio','rm-avg-win','rm-avg-loss','rm-winrate','rm-pf','rm-exp','rm-std','rm-best','rm-worst','rm-maxloss','rm-maxwin','rm-skew']
+      .forEach(id => $(id).textContent = '—');
+    $('rm-wl-pill').textContent = 'no trades';
+    $('rm-wl-pill').className = 'pill pill-gray';
+    return;
+  }
+
+  const aw = Number(m.avg_win_pct || 0);
+  const al = Number(m.avg_loss_pct || 0);
+  const wl = (al !== 0) ? (aw / Math.abs(al)) : null;
+  $('rm-wl-ratio').textContent = (wl == null) ? '—' : `${wl.toFixed(2)} : 1`;
+  $('rm-avg-win').textContent  = `+${aw.toFixed(2)}%`;
+  $('rm-avg-loss').textContent = `${al.toFixed(2)}%`;
+
+  const pill = $('rm-wl-pill');
+  if (wl == null) { pill.textContent = 'n/a'; pill.className = 'pill pill-gray'; }
+  else if (wl >= 1.5) { pill.textContent = 'healthy'; pill.className = 'pill pill-green'; }
+  else if (wl >= 1.0) { pill.textContent = 'mediocre'; pill.className = 'pill pill-amber'; }
+  else                { pill.textContent = 'weak';     pill.className = 'pill pill-red'; }
+
+  const winPct = (Number(m.win_rate || 0) * 100).toFixed(1) + '%';
+  $('rm-winrate').textContent = winPct;
+  $('rm-pf').textContent      = (m.profit_factor == null || !isFinite(m.profit_factor)) ? '∞' : Number(m.profit_factor).toFixed(2);
+  $('rm-exp').textContent     = `${Number(m.expectancy_pct || 0).toFixed(3)}%`;
+  $('rm-std').textContent     = `${Number(m.ret_std_pct || 0).toFixed(2)}%`;
+  $('rm-best').textContent    = `+${Number(m.best_trade_pct || 0).toFixed(1)}%`;
+  $('rm-worst').textContent   = `${Number(m.worst_trade_pct || 0).toFixed(1)}%`;
+  $('rm-maxloss').textContent = m.max_consecutive_losses ?? '—';
+  $('rm-maxwin').textContent  = m.max_consecutive_wins ?? '—';
+  $('rm-skew').textContent    = `skew ${Number(m.skew || 0).toFixed(2)} · kurt ${Number(m.kurt || 0).toFixed(2)}`;
+}
+
+let _scanState = { rows: [], topSet: new Set(), sortKey: 'rank', sortAsc: true, filter: '' };
+
+function renderScan(data) {
+  const rows = data.scan_rows || [];
+  document.getElementById('scan-stamp').textContent = data.scan_stamp ? `${data.scan_stamp.slice(0,4)}-${data.scan_stamp.slice(4,6)}-${data.scan_stamp.slice(6,8)} ${data.scan_stamp.slice(9,11)}:${data.scan_stamp.slice(11,13)}` : '—';
+  document.getElementById('scan-source').textContent = data.scan_source || 'no scan yet — run `bash scan_all.sh`';
+  // Pre-rank + remember the top-20 tickers so we can paint them green.
+  const ranked = rows.map((r, i) => ({ ...r, rank: i + 1 }));
+  const topPicks = (data.picks_by_date && data.picks_by_date[0]) || { picks: [] };
+  _scanState.rows = ranked;
+  _scanState.topSet = new Set(topPicks.picks.map(p => p.ticker));
+  document.getElementById('scan-total').textContent = ranked.length;
+  drawScanRows();
+  document.getElementById('scan-filter').oninput = e => { _scanState.filter = e.target.value.trim().toUpperCase(); drawScanRows(); };
+  document.querySelectorAll('[data-sort]').forEach(th => {
+    th.onclick = () => {
+      const k = th.dataset.sort;
+      _scanState.sortAsc = (_scanState.sortKey === k) ? !_scanState.sortAsc : (k === 'ticker' || k === 'rank');
+      _scanState.sortKey = k;
+      drawScanRows();
+    };
+  });
+}
+
+function drawScanRows() {
+  let list = _scanState.rows;
+  if (_scanState.filter) {
+    list = list.filter(r => (r.ticker || '').toUpperCase().includes(_scanState.filter));
+  }
+  const k = _scanState.sortKey;
+  const asc = _scanState.sortAsc;
+  list = [...list].sort((a, b) => {
+    let av = a[k], bv = b[k];
+    if (av === null || av === undefined) av = -Infinity;
+    if (bv === null || bv === undefined) bv = -Infinity;
+    if (typeof av === 'string') return asc ? av.localeCompare(bv) : bv.localeCompare(av);
+    return asc ? av - bv : bv - av;
+  });
+  const tbody = document.getElementById('scan-rows');
+  document.getElementById('scan-shown').textContent = list.length;
+  tbody.innerHTML = list.map(r => {
+    const isTop = _scanState.topSet.has(r.ticker);
+    const rowClass = 'border-b border-white/5' + (isTop ? ' bg-emerald-900/30' : '');
+    return `<tr class="${rowClass}">
+      <td class="text-xs text-slate-500">${r.rank}</td>
+      <td class="text-sm font-medium">${r.ticker || ''}${isTop ? ' <span class="pill pill-green" style="margin-left:4px">held</span>' : ''}</td>
+      <td class="text-right text-xs">${r.score === null ? '—' : r.score.toFixed(4)}</td>
+      <td class="text-right text-xs text-slate-400">${r.daily === null ? '—' : r.daily.toFixed(3)}</td>
+      <td class="text-right text-xs text-slate-400">${r.weekly === null ? '—' : r.weekly.toFixed(3)}</td>
+      <td class="text-right text-xs text-slate-400">${r.monthly === null ? '—' : r.monthly.toFixed(3)}</td>
+      <td class="text-right text-xs">${r.aligned ? '<span class="pill pill-green">yes</span>' : '<span class="pill pill-gray">no</span>'}</td>
+    </tr>`;
+  }).join('') || '<tr><td colspan="7" class="text-slate-500 text-xs py-3">No scan output yet. Run <code>bash scan_all.sh</code> to populate.</td></tr>';
+}
+
+let _journeyChart = null;
+let _journeyState = { journeys: {}, allTickers: [], current: null };
+
+function renderTickerJourney(data) {
+  const journeys = data.ticker_journeys || {};
+  const tickers = Object.keys(journeys).sort();
+  _journeyState.journeys = journeys;
+  _journeyState.allTickers = tickers;
+  document.getElementById('journey-count').textContent = tickers.length;
+
+  const sel = document.getElementById('journey-select');
+  const filter = document.getElementById('journey-filter');
+  const rows = document.getElementById('journey-rows');
+  const meta = document.getElementById('journey-meta');
+
+  if (!tickers.length) {
+    sel.innerHTML = '<option>—</option>';
+    rows.innerHTML = '<tr><td colspan="6" class="text-slate-500 text-xs py-3">No tickers met the top-N × 3 threshold yet — backtest a longer window.</td></tr>';
+    meta.textContent = '';
+    if (_journeyChart) { try { _journeyChart.destroy(); } catch(e){} _journeyChart = null; }
+    return;
+  }
+
+  // Default selection: the ticker with the most entries (most informative timeline).
+  const defaultTicker = tickers.slice().sort((a, b) => journeys[b].length - journeys[a].length)[0];
+
+  function populateSelect(matchList, selected) {
+    sel.innerHTML = matchList.map(t => `<option value="${t}" ${t === selected ? 'selected' : ''}>${t}  (${journeys[t].length} weeks)</option>`).join('');
+  }
+  populateSelect(tickers, defaultTicker);
+
+  function show(ticker) {
+    _journeyState.current = ticker;
+    const j = journeys[ticker] || [];
+    const topCount = j.filter(e => e.rank <= 20).length;
+    const winCount = j.filter(e => e.ret > 0).length;
+    const avgRet = j.length ? (j.reduce((a, e) => a + (e.ret || 0), 0) / j.length) : 0;
+    meta.textContent = `${j.length} weekly appearances · top-20 ${topCount}× · ${winCount} winning weeks · avg ret ${(avgRet*100).toFixed(2)}%`;
+    drawJourneyTable(j);
+    drawJourneyChart(ticker, j);
+  }
+
+  sel.onchange = () => show(sel.value);
+  filter.oninput = () => {
+    const q = filter.value.trim().toUpperCase();
+    const matches = q ? tickers.filter(t => t.toUpperCase().includes(q)) : tickers;
+    if (!matches.length) {
+      sel.innerHTML = '<option value="">no match</option>';
+      return;
+    }
+    const keep = matches.includes(_journeyState.current) ? _journeyState.current : matches[0];
+    populateSelect(matches, keep);
+    if (keep !== _journeyState.current) show(keep);
+  };
+
+  show(defaultTicker);
+}
+
+function drawJourneyTable(journey) {
+  const rows = document.getElementById('journey-rows');
+  if (!journey.length) {
+    rows.innerHTML = '<tr><td colspan="6" class="text-slate-500 text-xs py-3">—</td></tr>';
+    return;
+  }
+  // Newest first for readability.
+  const ordered = journey.slice().reverse();
+  rows.innerHTML = ordered.map(e => {
+    const cls = e.ret > 0 ? 'text-emerald-400' : 'text-rose-400';
+    const sign = e.ret >= 0 ? '+' : '';
+    const rankCls = e.rank <= 20 ? 'text-emerald-400' : 'text-slate-400';
+    return `<tr class="border-b border-white/5">
+      <td class="text-xs text-slate-400">${e.date}</td>
+      <td class="text-right text-xs ${rankCls}">#${e.rank}</td>
+      <td class="text-right text-xs">${e.score.toFixed(3)}</td>
+      <td class="text-right text-xs ${cls}">${sign}${(e.ret*100).toFixed(2)}%</td>
+      <td class="text-xs"><span class="pill pill-gray">${e.exit || 'hold'}</span></td>
+      <td class="text-xs text-slate-500">${e.exit_date || ''}</td>
+    </tr>`;
+  }).join('');
+}
+
+function drawJourneyChart(ticker, journey) {
+  const ctx = document.getElementById('journey-chart').getContext('2d');
+  if (_journeyChart) { try { _journeyChart.destroy(); } catch(e){} _journeyChart = null; }
+  const labels = journey.map(e => e.date);
+  const data = journey.map(e => e.score);
+  const colors = journey.map(e => (e.ret > 0 ? '#5fe6a2' : '#ff7a8a'));
+  _journeyChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        label: `${ticker} score`,
+        data,
+        borderColor: '#60a5fa',
+        backgroundColor: 'rgba(96,165,250,0.08)',
+        pointBackgroundColor: colors,
+        pointBorderColor: colors,
+        pointRadius: 4,
+        pointHoverRadius: 6,
+        borderWidth: 2,
+        tension: 0.2,
+        fill: true,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      plugins: {
+        legend: { labels: { color: '#94a3b8' } },
+        tooltip: {
+          callbacks: {
+            label: (item) => {
+              const e = journey[item.dataIndex];
+              const sign = e.ret >= 0 ? '+' : '';
+              return [
+                `${ticker} · rank #${e.rank}`,
+                `score ${e.score.toFixed(3)}`,
+                `next week: ${sign}${(e.ret*100).toFixed(2)}% (${e.exit || 'hold'})`,
+              ];
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(255,255,255,0.04)' }, title: { text: 'score', display: true, color: '#94a3b8' } },
+      }
+    }
+  });
 }
 
 function renderPicks(data) {
@@ -277,6 +785,249 @@ function renderTimeline(data) {
         x: { ticks: { color: '#64748b', maxTicksLimit: 8 }, grid: { color: 'rgba(255,255,255,0.04)' }},
         y:  { position: 'left',  ticks: { color: '#60a5fa' }, grid: { color: 'rgba(255,255,255,0.04)' }, title: { text: 'Sharpe', display: true, color: '#60a5fa' }},
         y1: { position: 'right', ticks: { color: '#5fe6a2', callback: v => (v*100).toFixed(0)+'%' }, grid: { drawOnChartArea: false }, title: { text: 'Return / |DD|', display: true, color: '#5fe6a2' }},
+      }
+    }
+  });
+}
+
+let _periodChart = null;
+let _periodState = { eq: [], bench: [], picks: [], regimes: [] };
+
+function renderPeriodExplorer(data) {
+  const eq = data.equity_curve || [];
+  const bench = data.benchmark_curve || [];
+  const picks = data.picks_by_date || [];
+  const regimes = data.regimes || [];
+  _periodState = { eq, bench, picks, regimes };
+
+  const card = document.getElementById('period-card');
+  if (eq.length < 2) { card.classList.add('hidden'); return; }
+  card.classList.remove('hidden');
+
+  const minD = eq[0].date, maxD = eq[eq.length - 1].date;
+  document.getElementById('period-range').textContent = `${minD} → ${maxD}`;
+  const fromI = document.getElementById('period-from');
+  const toI = document.getElementById('period-to');
+  fromI.min = minD; fromI.max = maxD; fromI.value = minD;
+  toI.min = minD; toI.max = maxD; toI.value = maxD;
+
+  // Presets: "Full" + every regime, clamped to the curve range. A regime that
+  // doesn't overlap the curve is shown disabled rather than hidden, so it's
+  // clear the data simply doesn't reach that far back.
+  const presets = [{ name: 'full', label: 'Full', start: minD, end: maxD, overlap: true }];
+  regimes.forEach(r => {
+    const overlap = !(r.end < minD || r.start > maxD);
+    presets.push({
+      name: r.name, label: r.label, kind: r.kind, overlap,
+      start: r.start > minD ? r.start : minD,
+      end: r.end < maxD ? r.end : maxD,
+    });
+  });
+
+  const wrap = document.getElementById('period-presets');
+  wrap.innerHTML = presets.map((p, i) => {
+    const cls = p.overlap
+      ? 'period-preset pill pill-gray hover:bg-sky-900/40 cursor-pointer'
+      : 'period-preset pill pill-gray opacity-40 cursor-not-allowed';
+    return `<button data-i="${i}" ${p.overlap ? '' : 'disabled'} class="${cls}" title="${p.start} → ${p.end}">${p.label}${p.overlap ? '' : ' · no data'}</button>`;
+  }).join('');
+
+  function highlight(btn) {
+    wrap.querySelectorAll('button.period-preset').forEach(x => { x.classList.remove('pill-green'); x.classList.add('pill-gray'); });
+    if (btn) { btn.classList.remove('pill-gray'); btn.classList.add('pill-green'); }
+  }
+  wrap.querySelectorAll('button.period-preset').forEach(b => {
+    if (b.disabled) return;
+    b.onclick = () => {
+      const p = presets[Number(b.dataset.i)];
+      fromI.value = p.start; toI.value = p.end;
+      highlight(b);
+      updatePeriod();
+    };
+  });
+
+  fromI.onchange = () => { highlight(null); updatePeriod(); };
+  toI.onchange = () => { highlight(null); updatePeriod(); };
+  document.getElementById('period-reset').onclick = () => {
+    fromI.value = minD; toI.value = maxD;
+    highlight(wrap.querySelector('button.period-preset[data-i="0"]'));
+    updatePeriod();
+  };
+
+  highlight(wrap.querySelector('button.period-preset[data-i="0"]'));
+  updatePeriod();
+}
+
+// Periods-per-year inferred from the median spacing of the slice (weekly ≈ 52,
+// monthly ≈ 12), so Sharpe/vol annualize correctly regardless of rebalance freq.
+function _periodsPerYear(slice) {
+  if (slice.length < 2) return 52;
+  const gaps = [];
+  for (let i = 1; i < slice.length; i++) {
+    const d0 = new Date(slice[i - 1].date), d1 = new Date(slice[i].date);
+    const g = (d1 - d0) / 86400000;
+    if (g > 0) gaps.push(g);
+  }
+  if (!gaps.length) return 52;
+  gaps.sort((a, b) => a - b);
+  const med = gaps[Math.floor(gaps.length / 2)] || 7;
+  return med > 0 ? 365.25 / med : 52;
+}
+
+function _curveStats(slice) {
+  if (slice.length < 2) return null;
+  const first = slice[0].value, last = slice[slice.length - 1].value;
+  const totalReturn = first ? last / first - 1 : null;
+  let peak = -Infinity, maxdd = 0;
+  for (const p of slice) {
+    if (p.value > peak) peak = p.value;
+    const dd = peak ? p.value / peak - 1 : 0;
+    if (dd < maxdd) maxdd = dd;
+  }
+  const rets = [];
+  for (let i = 1; i < slice.length; i++) {
+    const prev = slice[i - 1].value;
+    if (prev) rets.push(slice[i].value / prev - 1);
+  }
+  const mean = rets.reduce((a, b) => a + b, 0) / rets.length;
+  const variance = rets.reduce((a, b) => a + (b - mean) ** 2, 0) / (rets.length > 1 ? rets.length - 1 : 1);
+  const sd = Math.sqrt(variance);
+  const ppy = _periodsPerYear(slice);
+  return {
+    totalReturn, maxdd,
+    sharpe: sd ? (mean / sd) * Math.sqrt(ppy) : null,
+    vol: sd * Math.sqrt(ppy),
+    n: slice.length,
+  };
+}
+
+function _sliceCurve(curve, from, to) {
+  return curve.filter(p => p.date >= from && p.date <= to);
+}
+
+function updatePeriod() {
+  const from = document.getElementById('period-from').value;
+  const to = document.getElementById('period-to').value;
+  const { eq, bench, picks } = _periodState;
+  const $ = id => document.getElementById(id);
+  const eqSlice = _sliceCurve(eq, from, to);
+  const benchSlice = _sliceCurve(bench, from, to);
+  $('period-points').textContent = eqSlice.length;
+
+  const ids = ['pst-return', 'pst-spy', 'pst-alpha', 'pst-sharpe', 'pst-dd', 'pst-vol', 'pst-win', 'pst-trades'];
+  if (eqSlice.length < 2) {
+    ids.forEach(id => { $(id).textContent = '—'; });
+    drawPeriodChart([], []);
+    return;
+  }
+
+  const cs = _curveStats(eqSlice);
+  const bs = _curveStats(benchSlice);
+  const benchRet = bs ? bs.totalReturn : null;
+  const alpha = (benchRet == null) ? null : cs.totalReturn - benchRet;
+
+  let n = 0, wins = 0;
+  picks.forEach(d => {
+    if (d.date >= from && d.date <= to) {
+      d.picks.forEach(p => { n++; if (p.ret > 0) wins++; });
+    }
+  });
+
+  $('pst-return').textContent = fmtPctSigned(cs.totalReturn);
+  $('pst-return').className = 'text-lg num ' + (cs.totalReturn >= 0 ? 'text-emerald-400' : 'text-rose-400');
+  $('pst-spy').textContent = benchRet == null ? '—' : fmtPctSigned(benchRet);
+  $('pst-alpha').textContent = alpha == null ? '—' : fmtPctSigned(alpha);
+  $('pst-alpha').className = 'text-lg num ' + (alpha >= 0 ? 'text-emerald-400' : 'text-rose-400');
+  $('pst-sharpe').textContent = fmtNum(cs.sharpe);
+  $('pst-dd').textContent = fmtPct(cs.maxdd);
+  $('pst-vol').textContent = fmtPct(cs.vol);
+  $('pst-win').textContent = n ? (wins / n * 100).toFixed(1) + '%' : '—';
+  $('pst-trades').textContent = n;
+
+  drawPeriodChart(eqSlice, benchSlice);
+}
+
+function drawPeriodChart(eqSlice, benchSlice) {
+  const ctx = document.getElementById('period-chart').getContext('2d');
+  if (_periodChart) { try { _periodChart.destroy(); } catch (e) {} _periodChart = null; }
+  if (eqSlice.length < 2) {
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px ui-sans-serif, system-ui';
+    ctx.fillText('Selected window has too few points to plot.', 12, 24);
+    return;
+  }
+  const base = eqSlice[0].value || 1;
+  const labels = eqSlice.map(p => p.date);
+  const stratData = eqSlice.map(p => p.value / base);
+  const benchByDate = new Map(benchSlice.map(p => [p.date, p.value]));
+  const bBase = benchSlice.length ? benchSlice[0].value : null;
+  const benchData = labels.map(d => (benchByDate.has(d) && bBase) ? benchByDate.get(d) / bBase : null);
+
+  _periodChart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Strategy', data: stratData, borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.08)', tension: 0.15, borderWidth: 2, pointRadius: 0, fill: true },
+        { label: 'SPY (benchmark)', data: benchData, borderColor: '#94a3b8', borderDash: [5, 4], tension: 0.15, borderWidth: 1.5, pointRadius: 0, fill: false },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8' } },
+        title: { display: true, text: 'Re-based to 1.0 at window start', color: '#cbd5e1', font: { size: 12, weight: 'normal' } },
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: ${Number(c.parsed.y).toFixed(3)}×` } },
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.04)' } },
+        y: { ticks: { color: '#94a3b8', callback: v => Number(v).toFixed(2) + '×' }, grid: { color: 'rgba(255,255,255,0.04)' } },
+      }
+    }
+  });
+}
+
+function renderEquityCurve(data) {
+  const eq = data.equity_curve || [];
+  const bench = data.benchmark_curve || [];
+  document.getElementById('equity-source').textContent = data.equity_source || '—';
+  document.getElementById('equity-points').textContent = eq.length;
+
+  const ctx = document.getElementById('equity-chart').getContext('2d');
+  if (!eq.length) {
+    ctx.fillStyle = '#64748b';
+    ctx.font = '14px ui-sans-serif, system-ui';
+    ctx.fillText('No equity curve available for this strategy yet.', 12, 24);
+    return;
+  }
+
+  const benchByDate = new Map(bench.map(p => [p.date, p.value]));
+  const labels = eq.map(p => p.date);
+  const stratData = eq.map(p => p.value);
+  const benchData = eq.map(p => benchByDate.has(p.date) ? benchByDate.get(p.date) : null);
+
+  new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [
+        { label: 'Strategy', data: stratData, borderColor: '#60a5fa', backgroundColor: 'rgba(96,165,250,0.08)', tension: 0.15, borderWidth: 2, pointRadius: 0, fill: false },
+        { label: 'SPY (benchmark)', data: benchData, borderColor: '#94a3b8', borderDash: [5,4], tension: 0.15, borderWidth: 1.5, pointRadius: 0, fill: false },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, animation: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8' }},
+        title: { display: true, text: 'Strategy vs SPY — daily compounded equity (base = $1)', color: '#cbd5e1', font: { size: 13, weight: 'normal' }},
+        tooltip: { callbacks: { label: c => `${c.dataset.label}: $${Number(c.parsed.y).toFixed(3)}` }},
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxTicksLimit: 10 }, grid: { color: 'rgba(255,255,255,0.04)' }},
+        y: { ticks: { color: '#94a3b8', callback: v => '$' + Number(v).toFixed(2) }, grid: { color: 'rgba(255,255,255,0.04)' }},
       }
     }
   });
