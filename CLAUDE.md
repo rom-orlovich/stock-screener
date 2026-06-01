@@ -77,6 +77,30 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-06-01** — feat: **additive intra-week entry** in managed mode
+  (`BacktestConfig.intraweek_entry: bool = False`). OFF (default) keeps managed
+  entries on the weekly W-FRI anchors only → **bit-identical** to the original
+  managed path (`tests/fixtures/golden_managed.json`; `test_intraweek_off_parity`).
+  ON also scans every daily bar in `_run_managed`: a free slot whose breakout event
+  fires that day enters immediately instead of waiting for Friday — same name,
+  earlier entry, same risk sizing. Weekly equity sampling (n_per_year=52) and the
+  weekly re-rank are untouched; cost charged per-fill. Perf: precompute per-bar event
+  flags once (`_fired_series`, causal ⇒ bit-identical to `_breakout_event_fired`);
+  `_firers(t)` + `_ranked_at(only=…)` score ONLY event-firing candidates (non-firers
+  never enter, so output is unchanged — all 8 managed tests incl. goldens stay green).
+  Wired `run.py --intraweek-entry/--no-intraweek-entry`. Tests:
+  `scripts/test_managed_path.py`; validation `scripts/validate_intraweek.py`.
+  **Validation verdict (HONEST, leading_stock_v1, ON vs OFF, single-process, sp500
+  504 + russell3000 @ \$50M→1245):** intra-week ON wins **8/10 cells** — the only
+  losses are the clean broad bull (`bull_2021`) in each universe. sp500 is dramatic:
+  `full_2018` 160%→**515%** (sharpe 0.74→1.21), `full_2023` 72%→**171%** (sharpe
+  1.09→1.88, DD −18.8%→**−11.5%**); OFF *underperforms* buy-and-hold SPY on both long
+  windows (alpha −0.50, −0.28) but **ON flips to +3.05 / +0.71 alpha**. It's better
+  entry *timing*, not churn — only ~6–10% more trades, avg-hold unchanged (~24–29 bars),
+  win-rate + payoff both up. russell is the same *direction* but a **smaller edge**
+  (full_2018 2.04→2.42, bear_2022 −6.3%→**+1.2%**, ai_2023_2024 +8.2%→**+20.5%**) —
+  more false breakouts dilute it. YAML `intraweek_entry` left default **OFF** (opt-in
+  per run). See `/tmp/phaseA_RESULT.md`. Branch `feat/intraweek-entry`; not pushed/merged.
 - **2026-05-31** — feat: **`mode="managed"`** (`engine/backtest._run_managed` +
   helpers `_resolve_exit_levels`/`_build_precompute`/`_ranked_at`) — decoupled
   bar-by-bar hold. Positions persist across W-FRI bars, managed on every daily bar
