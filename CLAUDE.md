@@ -37,7 +37,15 @@ run.py ──► engine.backtest.run() ──► engine.score.score_ticker()
                 │   (only when YAML has         + timeframe sub-scores
                 │    absolute_momentum block)
                 │
-                └── _period_return_with_exits()
+                ├── _breakout_event_fired()
+                │   (only when cfg.mode in {"event","managed"}:
+                │    filters ranked picks to volume-confirmed breaks)
+                │
+                ├── _run_managed()  (only when cfg.mode=="managed":
+                │   decoupled bar-by-bar hold; positions persist across
+                │   rebalances; daily exits; slots refilled at rebalances)
+                │
+                └── _period_return_with_exits()  (rebalance/event only)
                     (stop / trail / tp / time / hold)
 
 auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
@@ -69,6 +77,77 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-06-01** — feat: **additive intra-week entry** in managed mode
+  (`BacktestConfig.intraweek_entry: bool = False`). OFF (default) keeps managed
+  entries on the weekly W-FRI anchors only → **bit-identical** to the original
+  managed path (`tests/fixtures/golden_managed.json`; `test_intraweek_off_parity`).
+  ON also scans every daily bar in `_run_managed`: a free slot whose breakout event
+  fires that day enters immediately instead of waiting for Friday — same name,
+  earlier entry, same risk sizing. Weekly equity sampling (n_per_year=52) and the
+  weekly re-rank are untouched; cost charged per-fill. Perf: precompute per-bar event
+  flags once (`_fired_series`, causal ⇒ bit-identical to `_breakout_event_fired`);
+  `_firers(t)` + `_ranked_at(only=…)` score ONLY event-firing candidates (non-firers
+  never enter, so output is unchanged — all 8 managed tests incl. goldens stay green).
+  Wired `run.py --intraweek-entry/--no-intraweek-entry`. Tests:
+  `scripts/test_managed_path.py`; validation `scripts/validate_intraweek.py`.
+  **Validation verdict (HONEST, leading_stock_v1, ON vs OFF, single-process, sp500
+  504 + russell3000 @ \$50M→1245):** intra-week ON wins **8/10 cells** — the only
+  losses are the clean broad bull (`bull_2021`) in each universe. sp500 is dramatic:
+  `full_2018` 160%→**515%** (sharpe 0.74→1.21), `full_2023` 72%→**171%** (sharpe
+  1.09→1.88, DD −18.8%→**−11.5%**); OFF *underperforms* buy-and-hold SPY on both long
+  windows (alpha −0.50, −0.28) but **ON flips to +3.05 / +0.71 alpha**. It's better
+  entry *timing*, not churn — only ~6–10% more trades, avg-hold unchanged (~24–29 bars),
+  win-rate + payoff both up. russell is the same *direction* but a **smaller edge**
+  (full_2018 2.04→2.42, bear_2022 −6.3%→**+1.2%**, ai_2023_2024 +8.2%→**+20.5%**) —
+  more false breakouts dilute it. YAML `intraweek_entry` left default **OFF** (opt-in
+  per run). See `/tmp/phaseA_RESULT.md`. Branch `feat/intraweek-entry`; not pushed/merged.
+- **2026-05-31** — feat: **`mode="managed"`** (`engine/backtest._run_managed` +
+  helpers `_resolve_exit_levels`/`_build_precompute`/`_ranked_at`) — decoupled
+  bar-by-bar hold. Positions persist across W-FRI bars, managed on every daily bar
+  (stop/trail/tp/time, arithmetic mirrored byte-for-byte from
+  `_period_return_with_exits`) until an exit fires; freed slots refill from the
+  event-confirmed ranking. Gated by `cfg.mode=="managed"` at the top of `run()` so
+  rebalance/event stay **bit-identical** (golden re-checked; I deliberately did NOT
+  refactor the shared exit/numba path — parity is sacred — managed *mirrors* it in
+  a separate stepper, proven by `test_stepper_parity`). Produces **real round-trip
+  trades** with a `bars_held` column (~1/3 the position-week count). Equity sampled
+  weekly (n_per_year=52 unchanged); cost charged once per round-trip. Wired into
+  `run.py --mode managed`. Tests: `scripts/test_managed_path.py`. **Validation
+  verdict (HONEST, `scripts/validate_managed_path.py`, full sp500 × {2023→now,
+  2018→now, bull_2021, bear_2022, ai_2023_2024} × 3 modes, parallel=3):** managed
+  is the FIRST mode with real R:R asymmetry — **payoff 1.11–1.35**, highest of the
+  3 modes in all 10 cells (vs event ~0.85–1.16, reb ~0.98–1.10; the only mode with
+  payoff>1 in the bear). Winners held ~14 daily bars vs losers ~10, and it has the
+  **best sharpe of the 3 on both full windows + both AI windows** (base full_2023
+  1.44 vs event 1.27 vs reb 1.01) and **the best max-DD vs event in all 10 cells**
+  (roughly halves it: base full_2023 −0.134 vs event −0.278; both 2018 windows
+  ~−0.16 vs event −0.42/−0.45). It loses sharpe only in the clean broad bull_2021
+  (1.94 vs reb 2.34). Trade-off is raw return/alpha: event wins return on 2023→now
+  (base +1.03 vs mgd +0.77) but **collapses on 2018→now where managed wins
+  decisively** (mgd +1.37 vs evt +0.39); managed alpha stays ~flat-to-negative,
+  event has the only positive long-window alpha (pre full_2023 +0.38) but at ~2.4×
+  the DD. Avg hold only ~2.3–2.5 weeks (capped by `time_stop_bars=15`; exits
+  time-dominated — base full_2023 time 709/stop 314/trail 92). Net: lower-beta,
+  lower-DD, asymmetric — strongest on the sharpe+DD gate, not a free lunch on
+  return. YAML `mode:` left at `event`. Next lever = raise/drop `time_stop_bars`
+  to let winners truly run. See `/tmp/managed_RESULT.md`. Not pushed/merged.
+- **2026-05-31** — feat: event-entry path. `BacktestConfig.mode`
+  (`rebalance` default / `event`), `_breakout_event_fired` (causal,
+  vectorized: `close > prior-N high` AND `volume >= k*avg`, trailing
+  `event_window_bars`, W-FRI cadence per Q1), `config_from_formula` reading a
+  YAML `backtest:` block. Wired into `run.py --mode` + `run_regimes.cfg_for`;
+  `mode: event` set only in the two breakout YAMLs. Default path bit-identical
+  (`scripts/test_event_path.py` golden). **Validation verdict (HONEST,
+  `scripts/validate_event_path.py`, full sp500 + 6 regimes): it does NOT make
+  these real breakout systems.** Payoff ratio stays ~1.0–1.1 in every mode,
+  max-DD generally *worsens* (filter shrinks the book → concentration), and
+  exits are ~89% `hold` / 0% `time` because the weekly rebalance caps each trade
+  at ~5 bars so stops/trails can't manage the trade. The `rebalance_stop`
+  ablation shows the stops alone do ~nothing. Event mode *does* lift
+  sharpe/alpha on 2023→now (pre_breakout flips to +0.38 alpha) but loses badly
+  in bull-2021/bear-2022. Fails the Q3 gate (sharpe+DD across regimes). Next
+  lever = decouple the hold from the W-FRI grid (manage bar-by-bar across weeks)
+  — out of scope here, changes `_stats`/cost parity. See `/tmp/event_RESULT.md`.
 - **2026-05-30** — feat: `breakout_thrust` sub-score in `engine/score.py`
   (`_breakout_thrust_score`) + its vectorized mirror in `engine/score_vec.py`.
   Trapezoid on `px/pivot - 1`: 0 at/below the causal pivot (`rolling_high`,
@@ -110,15 +189,25 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Known issues / TODO
 
-- `base_breakout_v1` still runs in rebalance mode. True event-driven
-  entry (enter on the day price > pivot AND volume > 2× avg, not at the
-  next Friday) is not implemented. When implementing, add
-  `BacktestConfig.mode: "event"` and gate the new path on that flag —
-  don't break the rebalance path.
-- The scoring sub-score `breakout` produces a continuous value, not a
-  binary trigger. For genuine R:R asymmetry the engine needs a separate
-  event detector (not a top-N ranker). Plan it before extending
-  `base_breakout_v1`.
+- **DONE (2026-05-31)** — decoupled hold (`mode="managed"`, `_run_managed`):
+  the "manage bar-by-bar across weeks" lever the event-path note called out as
+  out-of-scope. Positions persist across W-FRI bars, managed daily until a
+  stop/trail/tp/time exit fires; freed slots refill from the event ranking.
+  First mode to produce real R:R asymmetry (payoff ~1.3–1.5 in up regimes) +
+  lower drawdown, at the cost of raw return. `scripts/validate_managed_path.py`
+  (3-way), `scripts/test_managed_path.py`. See Recent changes / `/tmp/managed_RESULT.md`.
+- **DONE (2026-05-31)** — event-driven entry is implemented:
+  `BacktestConfig.mode` (`"rebalance"` default / `"event"`), gated so the
+  rebalance path stays bit-identical. Per decision Q1 the event detector
+  fires on the **weekly W-FRI bar** (not a daily scan — that would break
+  `n_per_year=52`, per-rebalance cost, and weekly-resample parity):
+  `_breakout_event_fired` requires `close > prior-N high` AND
+  `volume >= k*avg_vol` within the trailing `event_window_bars`. It filters
+  the ranked picks; it is NOT a separate detector replacing the ranker (the
+  ranker still orders, the event gates entry). See README "Entry modes".
+- The scoring sub-score `breakout` is still a continuous ranker. The event
+  mode now supplies the missing binary trigger as an entry *filter* on top of
+  the ranking + tight stops, which is what creates the R:R asymmetry.
 - `pre_breakout_v1` has `corr(score, return) ≈ -0.03` — the score is not
   predictive in its current form. The auto-tuner may still find local
   improvements, but don't expect it to fix the fundamental signal.

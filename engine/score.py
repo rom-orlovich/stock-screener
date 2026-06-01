@@ -73,6 +73,24 @@ def _breakout_thrust_score(px: float, hi: float,
     return 0.0
 
 
+def _gap_score(gap_pct: float, lo_band: float, hi_band: float, fade: float) -> float:
+    """Reward a recent accumulation gap-up sitting in a band.
+
+    `gap_pct` is the largest single-bar up-gap (open vs prior close) over the
+    lookback window — causal, only bars up to the evaluation bar. Triangle peaking
+    at `hi_band`: 0 below `lo_band` (noise, not a real gap), ramps lo->hi to 1.0,
+    fades hi->fade back to 0 (a >fade gap is a blow-off / exhaustion move — don't
+    buy it). Below 0 (gap-down) scores 0; this is a long-only confirmation term.
+    """
+    if not (pd.notna(gap_pct)) or gap_pct <= 0.0 or gap_pct < lo_band:
+        return 0.0
+    if gap_pct < hi_band:
+        return _clip01((gap_pct - lo_band) / max(hi_band - lo_band, 1e-9))
+    if gap_pct < fade:
+        return _clip01((fade - gap_pct) / max(fade - hi_band, 1e-9))
+    return 0.0
+
+
 def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
     """Score a single timeframe's OHLCV. Returns sub-scores + trend flag.
 
@@ -109,7 +127,7 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
         return {"momentum": 0.0, "trend": 0.0, "rsi": 0.0,
                 "breakout": 0.0, "breakout_thrust": 0.0, "volatility": 0.0,
                 "atr_contraction": 0.0, "volume_dryup": 0.0,
-                "bb_squeeze": 0.0,
+                "bb_squeeze": 0.0, "gap": 0.0,
                 "total": 0.0, "uptrend": False}
 
     rsi_v = ind.rsi(close, cfg["rsi_period"]).iloc[-1]
@@ -236,6 +254,21 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
         except Exception:  # noqa: BLE001
             bbsq_s = 0.0
 
+    # gap sub-score: largest single-bar up-gap (open vs prior close) over the
+    # trailing gap_lookback bars. Optional — only contributes if YAML weights
+    # mention `gap`. Causal: uses only bars up to the current one.
+    gap_s = 0.0
+    if "open" in df.columns and len(close) > 1:
+        glb = int(cfg.get("gap_lookback", 10))
+        g_lo = cfg.get("gap_band_lo", 0.02)
+        g_hi = cfg.get("gap_band_hi", 0.05)
+        g_fade = cfg.get("gap_fade", 0.12)
+        prev_close = close.shift(1)
+        gaps = (df["open"] - prev_close) / prev_close
+        recent = gaps.iloc[-glb:].dropna()
+        if not recent.empty:
+            gap_s = _gap_score(float(recent.max()), g_lo, g_hi, g_fade)
+
     # Stage-2 trend gate (opt-in via YAML): the quietness terms only count when
     # price sits above the slow SMA, dropping "quiet downtrend / topping" false
     # positives. Causal — `ss` uses only data up to the current bar.
@@ -251,7 +284,8 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
              + w.get("volatility", 0.0) * vol_s
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
-             + w.get("bb_squeeze", 0.0) * bbsq_s)
+             + w.get("bb_squeeze", 0.0) * bbsq_s
+             + w.get("gap", 0.0) * gap_s)
     return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
             "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
             "breakout_thrust": round(thrust_s, 4),
@@ -259,6 +293,7 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
             "atr_contraction": round(atr_s, 4),
             "volume_dryup": round(vdry_s, 4),
             "bb_squeeze": round(bbsq_s, 4),
+            "gap": round(gap_s, 4),
             "total": round(total, 4), "uptrend": bool(uptrend)}
 
 
@@ -347,6 +382,9 @@ def precompute_indicators(daily: pd.DataFrame, f: Formula) -> dict:
             "stdev_returns": ind.stdev_returns(close, cfg.get("volatility_lookback", 90)),
         }
         if {"open", "high", "low", "close"}.issubset(df.columns):
+            # Per-bar up-gap (open vs prior close); _timeframe_score_at takes a
+            # trailing rolling max. Causal — open[i] and close[i-1] only.
+            out["gap"] = (df["open"] - close.shift(1)) / close.shift(1)
             try:
                 out["atr_pct"] = atr_mod.atr_pct(df, cfg.get("atr_period", 14))
             except Exception:  # noqa: BLE001
@@ -459,7 +497,7 @@ _EMPTY_TF = {
     "momentum": 0.0, "trend": 0.0, "rsi": 0.0,
     "breakout": 0.0, "breakout_thrust": 0.0, "volatility": 0.0,
     "atr_contraction": 0.0, "volume_dryup": 0.0,
-    "bb_squeeze": 0.0,
+    "bb_squeeze": 0.0, "gap": 0.0,
     "total": 0.0, "uptrend": False,
 }
 
@@ -613,6 +651,21 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
         except Exception:  # noqa: BLE001
             bbsq_s = 0.0
 
+    # gap sub-score — mirror of the per-d0 path. `pre["gap"]` is the per-bar
+    # up-gap series; take the trailing rolling max over gap_lookback bars. The
+    # slice [start:pos+1] reproduces `gaps.iloc[-glb:]` on the length-(pos+1) slice.
+    gap_s = 0.0
+    gap_series = pre.get("gap")
+    if gap_series is not None and pos >= 1:
+        glb = int(cfg.get("gap_lookback", 10))
+        g_lo = cfg.get("gap_band_lo", 0.02)
+        g_hi = cfg.get("gap_band_hi", 0.05)
+        g_fade = cfg.get("gap_fade", 0.12)
+        start = max(0, pos - glb + 1)
+        recent = gap_series.iloc[start: pos + 1].dropna()
+        if not recent.empty:
+            gap_s = _gap_score(float(recent.max()), g_lo, g_hi, g_fade)
+
     # Stage-2 trend gate (opt-in via YAML) — mirror of the per-d0 path.
     if cfg.get("trend_gate_quietness", False) and not (pd.notna(ss) and px > ss):
         atr_s = vdry_s = bbsq_s = 0.0
@@ -626,7 +679,8 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
              + w.get("volatility", 0.0) * vol_s
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
-             + w.get("bb_squeeze", 0.0) * bbsq_s)
+             + w.get("bb_squeeze", 0.0) * bbsq_s
+             + w.get("gap", 0.0) * gap_s)
     return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
             "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
             "breakout_thrust": round(thrust_s, 4),
@@ -634,6 +688,7 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
             "atr_contraction": round(atr_s, 4),
             "volume_dryup": round(vdry_s, 4),
             "bb_squeeze": round(bbsq_s, 4),
+            "gap": round(gap_s, 4),
             "total": round(total, 4), "uptrend": bool(uptrend)}
 
 

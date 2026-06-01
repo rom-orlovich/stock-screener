@@ -111,6 +111,7 @@ def precompute_universe(price_data: Dict[str, pd.DataFrame], f: Formula) -> dict
     # Optional OHLC-only indicators — leave NaN when the ticker lacks the source.
     has_ohlc = np.zeros(N, dtype=bool)
     atr_pct = np.full((N, D), np.nan, dtype=np.float64)
+    gap = np.full((N, D), np.nan, dtype=np.float64)
     bb_width = np.full((N, D), np.nan, dtype=np.float64)
     has_volume = np.zeros(N, dtype=bool)
     avg_vol_short = np.full((N, D), np.nan, dtype=np.float64)
@@ -130,6 +131,8 @@ def precompute_universe(price_data: Dict[str, pd.DataFrame], f: Formula) -> dict
         if "atr_pct" in d:
             has_ohlc[i] = True
             atr_pct[i, :] = d["atr_pct"].reindex(master_daily).to_numpy(dtype=np.float64, copy=False)
+        if "gap" in d:
+            gap[i, :] = d["gap"].reindex(master_daily).to_numpy(dtype=np.float64, copy=False)
         if "bb_width" in d:
             bb_width[i, :] = d["bb_width"].reindex(master_daily).to_numpy(dtype=np.float64, copy=False)
         if "avg_vol_short" in d and "avg_vol_long" in d:
@@ -158,6 +161,7 @@ def precompute_universe(price_data: Dict[str, pd.DataFrame], f: Formula) -> dict
         "daily_rolling_low": mats["rolling_low"],
         "daily_stdev_returns": mats["stdev_returns"],
         "daily_atr_pct": atr_pct,
+        "daily_gap": gap,
         "daily_bb_width": bb_width,
         "daily_avg_vol_short": avg_vol_short,
         "daily_avg_vol_long": avg_vol_long,
@@ -327,6 +331,27 @@ def _daily_score_vectorized(
             else:
                 bbsq_s[j] = _clip01((1.0 - rank) / max(1.0 - bb_pct, 1e-6))
 
+    # gap — vectorized mirror of score._gap_score: trailing rolling max of the
+    # per-bar up-gap over gap_lookback bars, then the triangle band. gap survives
+    # the trend gate (it's a confirmation, not a quietness term).
+    gap_s = np.zeros_like(close)
+    if w.get("gap", 0.0) > 0.0 and "daily_gap" in universe_pre:
+        glb = int(cfg.get("gap_lookback", 10))
+        g_lo = cfg.get("gap_band_lo", 0.02)
+        g_hi = cfg.get("gap_band_hi", 0.05)
+        g_fade = cfg.get("gap_fade", 0.12)
+        start = max(0, d_pos - glb + 1)
+        gw = universe_pre["daily_gap"][mask, start: d_pos + 1]  # (Nmask, win)
+        gmax = np.nanmax(np.where(np.isnan(gw), -np.inf, gw), axis=1)
+        gmax = np.where(np.isneginf(gmax), np.nan, gmax)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ramp = np.clip((gmax - g_lo) / max(g_hi - g_lo, 1e-9), 0.0, 1.0)
+            fade_v = np.clip((g_fade - gmax) / max(g_fade - g_hi, 1e-9), 0.0, 1.0)
+        gap_s = np.where(
+            ~np.isfinite(gmax) | (gmax <= 0.0) | (gmax < g_lo), 0.0,
+            np.where(gmax < g_hi, ramp, np.where(gmax < g_fade, fade_v, 0.0)),
+        )
+
     # Stage-2 trend gate (opt-in via YAML) — mirror of the per-d0 path: the
     # quietness terms only count when price sits above the slow SMA.
     if cfg.get("trend_gate_quietness", False):
@@ -346,7 +371,8 @@ def _daily_score_vectorized(
              + w.get("volatility", 0.0) * vol_s
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
-             + w.get("bb_squeeze", 0.0) * bbsq_s)
+             + w.get("bb_squeeze", 0.0) * bbsq_s
+             + w.get("gap", 0.0) * gap_s)
 
     return np.round(total, 4), uptrend
 

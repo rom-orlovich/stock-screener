@@ -17,7 +17,7 @@ import pandas as pd
 from engine import backtest as bt
 from engine.data import get_universe
 from engine.score import Formula, rank
-from engine.universe import liquidity_filter, sp500
+from engine.universe import get_universe_tickers, liquidity_filter
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -35,9 +35,9 @@ def _stamp() -> str:
 
 
 def _resolve_tickers(args) -> list[str]:
-    """Resolve --universe sp500 or fallback to --tickers list."""
-    if getattr(args, "universe", None) == "sp500":
-        return sp500()
+    """Resolve a named --universe (sp500/russell3000/russell1000) or --tickers."""
+    if getattr(args, "universe", None):
+        return get_universe_tickers(args.universe)
     return args.tickers
 
 
@@ -80,7 +80,10 @@ def cmd_backtest(args):
         if bench and bench_df is not None and bench not in data:
             data[bench] = bench_df
         print(f"liquidity filter: {before} -> {len(data)} tickers", flush=True)
-    cfg = bt.BacktestConfig(
+    # Overlay any `backtest:` block in the formula YAML, then CLI flags win where
+    # explicitly set (None = not set, so the YAML/dataclass default stands).
+    cfg = bt.config_from_formula(
+        f,
         top_n=args.top_n, rebalance=args.rebalance,
         stop_loss_pct=args.stop_loss, take_profit_pct=args.take_profit,
         trailing_stop_pct=args.trailing_stop,
@@ -89,6 +92,8 @@ def cmd_backtest(args):
         atr_stop_period=args.atr_stop_period,
         time_stop_bars=args.time_stop_bars,
         benchmark_ticker=bench,
+        mode=args.mode,
+        intraweek_entry=args.intraweek_entry,
     )
     res = bt.run(data, f, start=args.start, end=args.end, cfg=cfg)
 
@@ -121,6 +126,10 @@ def main():
     s.add_argument("--formula", default="formulas/momentum_v1.yaml")
     s.add_argument("--provider", default="yf")
     s.add_argument("--tickers", nargs="*", default=DEFAULT_UNIVERSE)
+    s.add_argument("--universe", default=None,
+                   help="named universe (sp500/russell3000/russell1000); overrides --tickers")
+    s.add_argument("--min-liquidity", type=float, default=0.0,
+                   help="min 60d avg $-volume filter (0 = disabled)")
     s.add_argument("--top", type=int, default=15)
     s.set_defaults(func=cmd_scan)
 
@@ -129,23 +138,34 @@ def main():
     b.add_argument("--provider", default="yf")
     b.add_argument("--tickers", nargs="*", default=DEFAULT_UNIVERSE)
     b.add_argument("--universe", default=None,
-                   help="named universe (e.g. 'sp500'); overrides --tickers")
+                   help="named universe (sp500/russell3000/russell1000); overrides --tickers")
     b.add_argument("--start", required=True)
     b.add_argument("--end", required=True)
     b.add_argument("--top-n", type=int, default=5)
     b.add_argument("--rebalance", default="W-FRI")
-    b.add_argument("--stop-loss", type=float, default=0.0,
+    b.add_argument("--mode", choices=("rebalance", "event", "managed"), default=None,
+                   help="entry mode; overrides the formula's backtest.mode. "
+                        "'managed' = decoupled bar-by-bar hold (positions persist "
+                        "across rebalances, exits managed daily). Default: rebalance "
+                        "unless the YAML sets one.")
+    # Exit flags default to None so they don't clobber a formula's backtest:
+    # block — pass one explicitly to override. Unset everywhere -> no stops.
+    b.add_argument("--stop-loss", type=float, default=None,
                    help="exit if intra-period close falls this fraction below entry")
-    b.add_argument("--take-profit", type=float, default=0.0)
-    b.add_argument("--trailing-stop", type=float, default=0.0,
+    b.add_argument("--take-profit", type=float, default=None)
+    b.add_argument("--trailing-stop", type=float, default=None,
                    help="trailing stop fraction below running peak (0 = disabled)")
-    b.add_argument("--trailing-activate", type=float, default=0.05,
-                   help="activate trailing stop after this gain (default 5%)")
-    b.add_argument("--atr-stop-mult", type=float, default=0.0,
+    b.add_argument("--trailing-activate", type=float, default=None,
+                   help="activate trailing stop after this gain (default 5%%)")
+    b.add_argument("--atr-stop-mult", type=float, default=None,
                    help="hard stop = entry - N*ATR (0 = disabled, overrides --stop-loss)")
-    b.add_argument("--atr-stop-period", type=int, default=14)
-    b.add_argument("--time-stop-bars", type=int, default=0,
+    b.add_argument("--atr-stop-period", type=int, default=None)
+    b.add_argument("--time-stop-bars", type=int, default=None,
                    help="exit after N daily bars since entry (0 = disabled)")
+    b.add_argument("--intraweek-entry", action=argparse.BooleanOptionalAction, default=None,
+                   help="managed mode only: ADDITIVE intra-week entries — also enter "
+                        "on any daily bar whose breakout event fires, not just the "
+                        "weekly anchor. Default (off) is bit-identical to weekly-only.")
     b.add_argument("--benchmark", default="SPY",
                    help="buy-and-hold benchmark ticker for alpha calc")
     b.add_argument("--min-liquidity", type=float, default=0.0,

@@ -25,10 +25,29 @@ timeframe_score_weights:
   volatility: 0.0
   atr_contraction: 0.15
   volume_dryup: 0.15
-  bb_squeeze: 0.0
-rsi_band:
-- 45
-- 75
+  bb_squeeze: 0.00
+
+rsi_band: [45, 75]
+
+# Event-entry + trade management. Read by bt.config_from_formula (run.py,
+# run_regimes.py). mode="event" filters each weekly W-FRI scan to names with a
+# volume-confirmed break (close > prior-N high AND volume >= k*avg) on any of the
+# trailing event_window_bars; the tight ATR stop + trailing + time stop create
+# the asymmetric R:R a real breakout system needs. Run with --mode rebalance to
+# A/B against the legacy no-event path.
+backtest:
+  mode: event
+  vol_confirm_mult: 1.5          # k: today's volume >= 1.5 * avg_vol_long
+  event_lookback: 30             # prior-N-bar high (matches breakout_lookback)
+  event_vol_lookback: 60         # avg-volume window for confirmation
+  event_window_bars: 5           # break fired on any of trailing 5 bars <= d0
+  atr_stop_mult: 2.0             # hard stop = entry - 2*ATR(14)
+  atr_stop_period: 14
+  trailing_stop_pct: 0.06        # let winners run, trail 6% off the peak
+  trailing_activate_pct: 0.05
+  time_stop_bars: 15
+
+# Daily dominates — base breakout is a short-horizon setup.
 timeframe_weights:
   daily: 0.75
   weekly: 0.2

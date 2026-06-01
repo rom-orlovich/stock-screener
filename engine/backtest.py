@@ -14,6 +14,7 @@ Exit logic (priority order, evaluated on each daily close inside the period):
 """
 from __future__ import annotations
 
+import dataclasses
 import os
 from dataclasses import dataclass, field
 
@@ -102,7 +103,36 @@ class BacktestConfig:
     # New: time stop in daily bars since entry (0 = disabled).
     time_stop_bars: int = 0
 
+    # Managed-mode only: risk-based position sizing. 0 = equal-weight (legacy,
+    # ~equity/top_n per name). >0 sizes each entry so the distance to its stop
+    # (entry - stop_lvl, set by the ATR/flat stop) risks this fraction of current
+    # equity; the size is still capped at the equal-weight target so the book
+    # stays diversified. Rebalance/event paths ignore this (parity is sacred).
+    risk_per_trade: float = 0.0
+
     benchmark_ticker: str = "SPY"  # buy-and-hold ref over the same window.
+
+    # Event-entry mode. "rebalance" (default) is the legacy path and MUST stay
+    # bit-identical. "event" filters each weekly scan's ranked names down to those
+    # with a volume-confirmed breakout on (or just before) d0 — see
+    # `_breakout_event_fired`. Cadence stays the existing W-FRI rebalance bar
+    # (decision Q1: no daily scan — preserves n_per_year=52, per-rebalance cost,
+    # and the weekly-resample parity). Pair with stops for the asymmetric R:R.
+    mode: str = "rebalance"
+    vol_confirm_mult: float = 1.5        # today's volume >= k * avg_vol_long (Q2: fixed)
+    event_lookback: int = 0              # prior-N-bar high; 0 -> formula breakout_lookback
+    event_vol_lookback: int = 60         # avg-volume window for the confirmation
+    event_window_bars: int = 1           # fired on any of the trailing N bars <= d0
+
+    # Managed-mode ADDITIVE intra-week entry. False (default) = entries fire ONLY
+    # at the weekly W-FRI rebalance anchors -> behavior bit-identical to the
+    # original managed path (parity preserved). True = ALSO scan every daily bar:
+    # when a slot is free and the breakout event fires on THAT day's bar, enter
+    # that day instead of waiting for Friday. Weekly equity sampling and the
+    # weekly re-rank are unchanged; cost is charged per-fill as before. Strict
+    # superset of the weekly behavior — never removes a weekly entry, only adds
+    # earlier ones. Ignored outside managed mode.
+    intraweek_entry: bool = False
 
 
 @dataclass
@@ -262,6 +292,383 @@ def _market_regime_ok(price_data: dict[str, pd.DataFrame], abs_cfg: dict, d0: pd
     return b_ret > 0.0
 
 
+def _breakout_event_fired(df: pd.DataFrame, d0: pd.Timestamp, lookback: int,
+                          vol_mult: float, vol_lookback: int,
+                          window_bars: int) -> bool:
+    """True if a volume-confirmed breakout fired on any of the trailing
+    `window_bars` daily bars ending at d0.
+
+    Definition (fully causal — no lookahead):
+      break    : close > prior-`lookback`-bar high   (high.shift(1).rolling(lb).max(),
+                 the current bar excluded — same semantics as engine.indicators.rolling_high)
+      confirm  : volume >= vol_mult * volume.rolling(vol_lookback).mean()
+                 (today's volume is known at the close; the rolling mean is backward-looking)
+
+    Only used when cfg.mode == "event"; the default path never calls this.
+    """
+    if "volume" not in df.columns:
+        return False
+    hist = df.loc[:d0]
+    need = max(int(lookback), int(vol_lookback)) + 1
+    if len(hist) < need:
+        return False
+    close = hist["close"]
+    high = hist["high"] if "high" in hist.columns else close
+    vol = hist["volume"]
+    roll_hi = high.shift(1).rolling(window=int(lookback), min_periods=int(lookback)).max()
+    avg_vol = vol.rolling(window=int(vol_lookback), min_periods=int(vol_lookback)).mean()
+    # NaN comparisons (warmup bars) evaluate False — exactly what we want.
+    broke = close.to_numpy() > roll_hi.to_numpy()
+    confirmed = vol.to_numpy() >= (float(vol_mult) * avg_vol.to_numpy())
+    fired = broke & confirmed
+    if fired.size == 0:
+        return False
+    w = max(1, int(window_bars))
+    return bool(fired[-w:].any())
+
+
+def _fired_series(df: pd.DataFrame, lookback: int, vol_mult: float,
+                  vol_lookback: int) -> np.ndarray:
+    """Vectorized per-bar event-fired flags over the WHOLE series — bit-identical
+    to the `broke & confirmed` array inside _breakout_event_fired (rolling is
+    causal, so computing over the full df gives the same value at each bar as
+    slicing to d0). Precomputed once per ticker in managed mode so _enter can
+    cheaply pre-filter to event-firing candidates instead of scoring everything."""
+    if "volume" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    close = df["close"]
+    high = df["high"] if "high" in df.columns else close
+    vol = df["volume"]
+    roll_hi = high.shift(1).rolling(window=int(lookback), min_periods=int(lookback)).max()
+    avg_vol = vol.rolling(window=int(vol_lookback), min_periods=int(vol_lookback)).mean()
+    broke = close.to_numpy() > roll_hi.to_numpy()
+    confirmed = vol.to_numpy() >= (float(vol_mult) * avg_vol.to_numpy())
+    return broke & confirmed
+
+
+def config_from_formula(f: Formula, **overrides) -> BacktestConfig:
+    """Build a BacktestConfig from an optional `backtest:` block in the formula
+    YAML, with explicit (non-None) keyword overrides taking precedence.
+
+    Keys not matching a BacktestConfig field are ignored. This is how the two
+    breakout formulas carry their event-mode + exit settings without hardcoding
+    them in run.py / run_regimes.py.
+    """
+    blk = dict(f.raw.get("backtest") or {})
+    valid = {fld.name for fld in dataclasses.fields(BacktestConfig)}
+    kwargs = {k: v for k, v in blk.items() if k in valid}
+    for k, v in overrides.items():
+        if v is not None:
+            kwargs[k] = v
+    return BacktestConfig(**kwargs)
+
+
+def _resolve_exit_levels(df: pd.DataFrame, d0: pd.Timestamp, entry: float,
+                         cfg: BacktestConfig) -> tuple[float | None, float | None, float | None]:
+    """Resolve (stop_lvl, tp_lvl, trail_arm_lvl) at entry — byte-for-byte the same
+    arithmetic as _period_return_with_exits lines 143-157, so managed-mode exits
+    are identical in semantics to the single-window path."""
+    stop_lvl: float | None = None
+    if cfg.atr_stop_mult > 0.0:
+        try:
+            hist = df.loc[:d0]
+            atr_v = atr_mod.atr(hist, cfg.atr_stop_period).iloc[-1]
+            if pd.notna(atr_v) and atr_v > 0:
+                stop_lvl = entry - float(cfg.atr_stop_mult) * float(atr_v)
+        except Exception:  # noqa: BLE001
+            stop_lvl = None
+    if stop_lvl is None and cfg.stop_loss_pct > 0.0:
+        stop_lvl = entry * (1.0 - cfg.stop_loss_pct)
+    tp_lvl = entry * (1.0 + cfg.take_profit_pct) if cfg.take_profit_pct > 0.0 else None
+    trail_arm_lvl = entry * (1.0 + cfg.trailing_activate_pct) if cfg.trailing_stop_pct > 0.0 else None
+    return stop_lvl, tp_lvl, trail_arm_lvl
+
+
+def _build_precompute(price_data: dict[str, pd.DataFrame], f: Formula,
+                      cfg: BacktestConfig, bank: dict | None) -> dict:
+    """Set up the scoring fast-path context (mirrors run()'s setup block). Used by
+    the managed path so run() itself stays byte-identical."""
+    use_vec = (os.environ.get("USE_VECTORIZED_SCORING", "0") == "1"
+               and cfg.rebalance.endswith("FRI"))
+    use_xs = (os.environ.get("USE_CROSS_SECTION", "0") == "1"
+              and cfg.rebalance.endswith("FRI"))
+    precomputed: dict[str, dict | None] = {}
+    universe_pre: dict | None = None
+    if use_xs:
+        universe_pre = precompute_universe(price_data, f)
+    elif use_vec:
+        assemble = None
+        if bank is not None:
+            from .bank import assemble_precompute as assemble  # lazy
+        for tkr, df in price_data.items():
+            try:
+                if assemble is not None and tkr in bank:
+                    precomputed[tkr] = assemble(bank[tkr], f)
+                else:
+                    precomputed[tkr] = precompute_indicators(df, f)
+            except Exception:  # noqa: BLE001
+                precomputed[tkr] = None
+    return {"use_vec": use_vec, "use_xs": use_xs,
+            "precomputed": precomputed, "universe_pre": universe_pre}
+
+
+def _ranked_at(price_data: dict[str, pd.DataFrame], f: Formula, d0: pd.Timestamp,
+               cfg: BacktestConfig, ctx: dict,
+               only: set[str] | None = None) -> list[tuple[str, float]]:
+    """Score + rank every ticker at d0 (no lookahead) — mirrors run()'s ranking
+    block exactly so managed picks come from the same scores as rebalance/event.
+
+    `only` (managed perf): when given, score only these tickers. Used to restrict
+    ranking to the event-firing candidates — non-firers can never enter (the event
+    gate in _enter skips them), so the entered set / order is bit-identical while
+    avoiding scoring the whole universe on every entry bar."""
+    ranked: list[tuple[str, float]] = []
+    if ctx["use_xs"] and ctx["universe_pre"] is not None:
+        xs_scores = score_universe_at(ctx["universe_pre"], d0, f)
+        for tkr, df in price_data.items():
+            if only is not None and tkr not in only:
+                continue
+            if len(df.loc[:d0]) < 60:
+                continue
+            sc = xs_scores.get(tkr, 0.0)
+            if sc >= cfg.min_score:
+                ranked.append((tkr, sc))
+    else:
+        for tkr, df in price_data.items():
+            if only is not None and tkr not in only:
+                continue
+            if len(df.loc[:d0]) < 60:
+                continue
+            try:
+                pre = ctx["precomputed"].get(tkr) if ctx["use_vec"] else None
+                if pre is not None:
+                    sc = score_ticker_at(pre, d0, f)["score"]
+                else:
+                    sc = score_ticker(df.loc[:d0], f)["score"]
+            except Exception:  # noqa: BLE001
+                continue
+            if sc >= cfg.min_score:
+                ranked.append((tkr, sc))
+    ranked.sort(key=lambda x: x[1], reverse=True)
+    return ranked
+
+
+def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
+                 start: str, end: str, cfg: BacktestConfig,
+                 bank: dict | None = None) -> BacktestResult:
+    """mode="managed": bar-by-bar portfolio sim that DECOUPLES the holding period
+    from the W-FRI rebalance grid. Positions persist across rebalance bars and are
+    managed on EVERY daily bar (stop / trail / tp / time, same priority and
+    arithmetic as _period_return_with_exits) until an exit fires; freed slots are
+    refilled at rebalance bars from the event-confirmed ranking. This is the fix
+    the event-path validation pointed to: on the weekly grid every trade is force-
+    closed at the next Friday (~5 bars), so time/trailing never fire — here they can.
+
+    Produces REAL round-trip trades (a multi-week winner = ONE trade, with a
+    `bars_held` column), so win-rate / payoff / avg-hold are honest.
+
+    Documented differences from the rebalance/event path (deliberate, not parity
+    bugs — managed is a separate mode; rebalance/event stay bit-identical):
+      - Equity is sampled at the rebalance anchors (weekly), so _stats annualizes
+        identically (n_per_year=52); exits are still evaluated on every daily bar.
+      - Each sleeve compounds independently (winners are never trimmed back to
+        equal weight — that's the point); new entries deploy ~equity/top_n.
+      - Cost is charged once per round-trip at entry (capital0 *= 1-cost), not on
+        the whole book every week — a multi-week hold pays no weekly turnover.
+      - Positions still open at the window end are recorded with exit="open"
+        (marked-to-market) so the trade table accounts for all capital.
+    """
+    reb_dates = pd.date_range(start=start, end=end, freq=cfg.rebalance)
+    if len(reb_dates) < 2:
+        raise ValueError("backtest window too short for the rebalance frequency")
+
+    ctx = _build_precompute(price_data, f, cfg, bank)
+
+    # Master daily calendar: every market day (benchmark index), else the union.
+    cal = price_data.get(cfg.benchmark_ticker)
+    if cal is not None and not cal.empty:
+        master = cal.index
+    else:
+        master = pd.DatetimeIndex(sorted(set().union(*[df.index for df in price_data.values()])))
+    lo, hi = reb_dates[0], reb_dates[-1]
+    master = master[(master >= lo) & (master <= hi)]
+    if len(master) == 0:
+        raise ValueError("no trading days in the requested window")
+
+    # Rebalance anchor = last trading day <= each calendar Friday. Scoring at the
+    # anchor == scoring at the Friday (.loc[:fri] == .loc[:anchor]).
+    anchors: list[pd.Timestamp] = []
+    seen: set = set()
+    for fri in reb_dates:
+        prior = master[master <= fri]
+        if len(prior):
+            a = prior[-1]
+            if a not in seen:
+                seen.add(a)
+                anchors.append(a)
+    anchor_set = set(anchors)
+    lb = int(cfg.event_lookback) or int(f.raw.get("indicators", {}).get("breakout_lookback", 30))
+    cost = cfg.cost_bps / 10000.0
+
+    # Precompute per-bar event flags once per ticker (bit-identical to
+    # _breakout_event_fired). _firers(t) then returns the names whose event fired
+    # within the trailing window ending at t via an O(1) array slice — so _enter
+    # scores only event-firing candidates, not the whole universe, on every bar.
+    win = max(1, int(cfg.event_window_bars))
+    fired_map: dict[str, np.ndarray] = {
+        tkr: _fired_series(df, lb, cfg.vol_confirm_mult, cfg.event_vol_lookback)
+        for tkr, df in price_data.items()
+    }
+
+    cash = 1.0
+    positions: dict[str, dict] = {}
+    trades: list[dict] = []
+    equity: list[float] = []
+    eq_index: list[pd.Timestamp] = []
+
+    def _mv(t: pd.Timestamp) -> float:
+        tot = cash
+        for tkr, p in positions.items():
+            px = price_data[tkr]["close"].asof(t)
+            if pd.notna(px):
+                tot += p["capital0"] * float(px) / p["entry_price"]
+        return tot
+
+    def _close(tkr: str, t: pd.Timestamp, px: float, reason: str) -> None:
+        nonlocal cash
+        p = positions.pop(tkr)
+        cash += p["capital0"] * px / p["entry_price"]
+        trades.append({"enter": p["entry_date"], "exit_date": t, "ticker": tkr,
+                       "score": round(p["score"], 4),
+                       "ret": round(px / p["entry_price"] - 1.0, 4),
+                       "exit": reason, "bars_held": int(p["bars_held"])})
+
+    def _exits(t: pd.Timestamp) -> None:
+        for tkr in list(positions):
+            p = positions[tkr]
+            if t <= p["entry_date"]:
+                continue
+            px = price_data[tkr]["close"].asof(t)
+            if pd.isna(px):
+                continue
+            px = float(px)
+            p["bars_held"] += 1
+            if cfg.trailing_stop_pct > 0.0:
+                if px > p["peak"]:
+                    p["peak"] = px
+                if not p["trail_armed"] and p["trail_arm_lvl"] is not None and px >= p["trail_arm_lvl"]:
+                    p["trail_armed"] = True
+                if p["trail_armed"]:
+                    p["trail_lvl"] = p["peak"] * (1.0 - cfg.trailing_stop_pct)
+            reason = None
+            if p["stop_lvl"] is not None and px <= p["stop_lvl"]:
+                reason = "stop"
+            elif p["trail_lvl"] is not None and px <= p["trail_lvl"]:
+                reason = "trail"
+            elif p["tp_lvl"] is not None and px >= p["tp_lvl"]:
+                reason = "tp"
+            elif cfg.time_stop_bars > 0 and p["bars_held"] >= cfg.time_stop_bars:
+                reason = "time"
+            if reason is not None:
+                _close(tkr, t, px, reason)
+
+    def _firers(t: pd.Timestamp) -> set[str]:
+        """Names (not currently held) whose breakout event fired within the
+        trailing `win` bars ending at the last bar <= t. O(1) array slice per
+        ticker — same condition as _breakout_event_fired, just precomputed."""
+        out: set[str] = set()
+        for tkr, df in price_data.items():
+            if tkr in positions:
+                continue
+            pos = df.index.searchsorted(t, side="right") - 1
+            if pos < 0:
+                continue
+            lo = pos - win + 1
+            if lo < 0:
+                lo = 0
+            if fired_map[tkr][lo:pos + 1].any():
+                out.add(tkr)
+        return out
+
+    def _enter(t: pd.Timestamp) -> None:
+        nonlocal cash
+        free = cfg.top_n - len(positions)
+        if free <= 0:
+            return
+        firers = _firers(t)
+        if not firers:
+            return
+        ranked = _ranked_at(price_data, f, t, cfg, ctx, only=firers)
+        mv = _mv(t)
+        target = (mv / cfg.top_n) if cfg.top_n else 0.0
+        added = 0
+        for tkr, sc in ranked:
+            if added >= free:
+                break
+            if tkr in positions:
+                continue
+            if not _breakout_event_fired(price_data[tkr], t, lb, cfg.vol_confirm_mult,
+                                         cfg.event_vol_lookback, cfg.event_window_bars):
+                continue
+            px = price_data[tkr]["close"].asof(t)
+            if pd.isna(px) or float(px) <= 0:
+                continue
+            entry = float(px)
+            stop_lvl, tp_lvl, trail_arm_lvl = _resolve_exit_levels(price_data[tkr], t, entry, cfg)
+            # Risk-based sizing: budget cfg.risk_per_trade of equity to the stop
+            # distance, capped at the equal-weight target. risk_per_trade=0 (or no
+            # stop) -> equal weight, byte-identical to the legacy managed path.
+            size = target
+            if cfg.risk_per_trade > 0.0 and stop_lvl is not None and entry > stop_lvl:
+                risk_frac = (entry - stop_lvl) / entry
+                if risk_frac > 0.0:
+                    size = min(target, mv * cfg.risk_per_trade / risk_frac)
+            deploy = min(size, cash)
+            if deploy <= 1e-12:
+                break
+            cash -= deploy
+            positions[tkr] = {
+                "entry_price": entry, "entry_date": t, "capital0": deploy * (1.0 - cost),
+                "peak": entry, "bars_held": 0, "score": sc,
+                "stop_lvl": stop_lvl, "tp_lvl": tp_lvl,
+                "trail_arm_lvl": trail_arm_lvl, "trail_armed": False, "trail_lvl": None,
+            }
+            added += 1
+
+    # First anchor: baseline equity 1.0, open the initial book.
+    equity.append(1.0)
+    eq_index.append(anchors[0])
+    _enter(anchors[0])
+
+    for t in master:
+        if t <= anchors[0]:
+            continue
+        _exits(t)
+        if t in anchor_set:
+            _enter(t)
+            equity.append(_mv(t))
+            eq_index.append(t)
+        elif cfg.intraweek_entry:
+            # ADDITIVE: scan this mid-week bar too. _enter is a no-op when the
+            # book is full (free <= 0) and only fills slots whose breakout event
+            # fired on/just before t. Equity is NOT sampled here — weekly sampling
+            # (n_per_year=52) and the weekly re-rank above are untouched.
+            _enter(t)
+
+    # Mark-to-market close any positions still open at the final bar.
+    last = master[-1]
+    for tkr in list(positions):
+        px = price_data[tkr]["close"].asof(last)
+        if pd.notna(px):
+            _close(tkr, last, float(px), "open")
+
+    eq = pd.Series(equity, index=pd.DatetimeIndex(eq_index), name="equity")
+    tr = pd.DataFrame(trades)
+    bench_eq = _benchmark_equity(price_data, cfg.benchmark_ticker, eq.index)
+    stats = _stats(eq, tr, cfg, bench_eq)
+    return BacktestResult(equity=eq, trades=tr, stats=stats, benchmark_equity=bench_eq)
+
+
 def run(price_data: dict[str, pd.DataFrame], f: Formula,
         start: str, end: str, cfg: BacktestConfig | None = None,
         bank: dict | None = None) -> BacktestResult:
@@ -272,6 +679,10 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
     vectorized path is active.
     """
     cfg = cfg or BacktestConfig()
+    if cfg.mode == "managed":
+        # Decoupled bar-by-bar portfolio path. Isolated entirely so the
+        # rebalance/event path below stays byte-identical (parity is sacred).
+        return _run_managed(price_data, f, start, end, cfg, bank)
     dates = pd.date_range(start=start, end=end, freq=cfg.rebalance)
     if len(dates) < 2:
         raise ValueError("backtest window too short for the rebalance frequency")
@@ -351,7 +762,21 @@ def run(price_data: dict[str, pd.DataFrame], f: Formula,
                 if sc >= cfg.min_score:
                     ranked.append((tkr, sc))
         ranked.sort(key=lambda x: x[1], reverse=True)
-        picks = ranked[: cfg.top_n]
+        if cfg.mode == "event":
+            # Keep only ranked names with a volume-confirmed breakout on/just
+            # before d0. Walk the sorted list and stop once top_n slots fill —
+            # so we test only as many names as needed (cheap), and event-fired
+            # names fill the book rather than leaving it short.
+            lb = int(cfg.event_lookback) or int(f.raw.get("indicators", {}).get("breakout_lookback", 30))
+            picks = []
+            for tkr, sc in ranked:
+                if _breakout_event_fired(price_data[tkr], d0, lb, cfg.vol_confirm_mult,
+                                         cfg.event_vol_lookback, cfg.event_window_bars):
+                    picks.append((tkr, sc))
+                    if len(picks) >= cfg.top_n:
+                        break
+        else:
+            picks = ranked[: cfg.top_n]
 
         if not picks:
             equity.append(equity[-1])

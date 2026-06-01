@@ -37,3 +37,4 @@ formulas/*.bak_*.yaml
 
 # Per-host Python venv (created locally; deps from requirements/setup as needed)
 .venv/
+.claude/scheduled_tasks.lock
