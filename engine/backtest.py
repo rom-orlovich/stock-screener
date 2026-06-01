@@ -327,6 +327,25 @@ def _breakout_event_fired(df: pd.DataFrame, d0: pd.Timestamp, lookback: int,
     return bool(fired[-w:].any())
 
 
+def _fired_series(df: pd.DataFrame, lookback: int, vol_mult: float,
+                  vol_lookback: int) -> np.ndarray:
+    """Vectorized per-bar event-fired flags over the WHOLE series — bit-identical
+    to the `broke & confirmed` array inside _breakout_event_fired (rolling is
+    causal, so computing over the full df gives the same value at each bar as
+    slicing to d0). Precomputed once per ticker in managed mode so _enter can
+    cheaply pre-filter to event-firing candidates instead of scoring everything."""
+    if "volume" not in df.columns:
+        return np.zeros(len(df), dtype=bool)
+    close = df["close"]
+    high = df["high"] if "high" in df.columns else close
+    vol = df["volume"]
+    roll_hi = high.shift(1).rolling(window=int(lookback), min_periods=int(lookback)).max()
+    avg_vol = vol.rolling(window=int(vol_lookback), min_periods=int(vol_lookback)).mean()
+    broke = close.to_numpy() > roll_hi.to_numpy()
+    confirmed = vol.to_numpy() >= (float(vol_mult) * avg_vol.to_numpy())
+    return broke & confirmed
+
+
 def config_from_formula(f: Formula, **overrides) -> BacktestConfig:
     """Build a BacktestConfig from an optional `backtest:` block in the formula
     YAML, with explicit (non-None) keyword overrides taking precedence.
@@ -394,13 +413,21 @@ def _build_precompute(price_data: dict[str, pd.DataFrame], f: Formula,
 
 
 def _ranked_at(price_data: dict[str, pd.DataFrame], f: Formula, d0: pd.Timestamp,
-               cfg: BacktestConfig, ctx: dict) -> list[tuple[str, float]]:
+               cfg: BacktestConfig, ctx: dict,
+               only: set[str] | None = None) -> list[tuple[str, float]]:
     """Score + rank every ticker at d0 (no lookahead) — mirrors run()'s ranking
-    block exactly so managed picks come from the same scores as rebalance/event."""
+    block exactly so managed picks come from the same scores as rebalance/event.
+
+    `only` (managed perf): when given, score only these tickers. Used to restrict
+    ranking to the event-firing candidates — non-firers can never enter (the event
+    gate in _enter skips them), so the entered set / order is bit-identical while
+    avoiding scoring the whole universe on every entry bar."""
     ranked: list[tuple[str, float]] = []
     if ctx["use_xs"] and ctx["universe_pre"] is not None:
         xs_scores = score_universe_at(ctx["universe_pre"], d0, f)
         for tkr, df in price_data.items():
+            if only is not None and tkr not in only:
+                continue
             if len(df.loc[:d0]) < 60:
                 continue
             sc = xs_scores.get(tkr, 0.0)
@@ -408,6 +435,8 @@ def _ranked_at(price_data: dict[str, pd.DataFrame], f: Formula, d0: pd.Timestamp
                 ranked.append((tkr, sc))
     else:
         for tkr, df in price_data.items():
+            if only is not None and tkr not in only:
+                continue
             if len(df.loc[:d0]) < 60:
                 continue
             try:
@@ -481,6 +510,16 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
     lb = int(cfg.event_lookback) or int(f.raw.get("indicators", {}).get("breakout_lookback", 30))
     cost = cfg.cost_bps / 10000.0
 
+    # Precompute per-bar event flags once per ticker (bit-identical to
+    # _breakout_event_fired). _firers(t) then returns the names whose event fired
+    # within the trailing window ending at t via an O(1) array slice — so _enter
+    # scores only event-firing candidates, not the whole universe, on every bar.
+    win = max(1, int(cfg.event_window_bars))
+    fired_map: dict[str, np.ndarray] = {
+        tkr: _fired_series(df, lb, cfg.vol_confirm_mult, cfg.event_vol_lookback)
+        for tkr, df in price_data.items()
+    }
+
     cash = 1.0
     positions: dict[str, dict] = {}
     trades: list[dict] = []
@@ -533,12 +572,33 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
             if reason is not None:
                 _close(tkr, t, px, reason)
 
+    def _firers(t: pd.Timestamp) -> set[str]:
+        """Names (not currently held) whose breakout event fired within the
+        trailing `win` bars ending at the last bar <= t. O(1) array slice per
+        ticker — same condition as _breakout_event_fired, just precomputed."""
+        out: set[str] = set()
+        for tkr, df in price_data.items():
+            if tkr in positions:
+                continue
+            pos = df.index.searchsorted(t, side="right") - 1
+            if pos < 0:
+                continue
+            lo = pos - win + 1
+            if lo < 0:
+                lo = 0
+            if fired_map[tkr][lo:pos + 1].any():
+                out.add(tkr)
+        return out
+
     def _enter(t: pd.Timestamp) -> None:
         nonlocal cash
         free = cfg.top_n - len(positions)
         if free <= 0:
             return
-        ranked = _ranked_at(price_data, f, t, cfg, ctx)
+        firers = _firers(t)
+        if not firers:
+            return
+        ranked = _ranked_at(price_data, f, t, cfg, ctx, only=firers)
         mv = _mv(t)
         target = (mv / cfg.top_n) if cfg.top_n else 0.0
         added = 0
