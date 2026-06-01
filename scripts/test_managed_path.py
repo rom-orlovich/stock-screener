@@ -277,6 +277,102 @@ def test_no_leak() -> None:
     print(f"[PASS] no leak — all {len(res.trades)} managed entries event-confirmed")
 
 
+# --------------------------------------------------------------------------
+# 7. INTRA-WEEK ENTRY (additive) — OFF = parity, ON = enters mid-week
+# --------------------------------------------------------------------------
+FIXTURE_MGD = ROOT / "tests" / "fixtures" / "golden_managed.json"
+
+
+def _managed_golden_cfgs() -> dict[str, bt.BacktestConfig]:
+    """Two managed configs that exercise the daily exit machinery + event gate.
+    The intra-week OFF path must reproduce these byte-for-byte (parity)."""
+    return {
+        "mgd_neutral": _managed_cfg(top_n=3),
+        "mgd_event": bt.BacktestConfig(
+            top_n=4, rebalance="W-FRI", mode="managed",
+            vol_confirm_mult=1.5, event_lookback=30, event_vol_lookback=60,
+            event_window_bars=5, atr_stop_mult=2.0, trailing_stop_pct=0.06,
+            trailing_activate_pct=0.05, time_stop_bars=15),
+    }
+
+
+def capture_managed_golden() -> None:
+    data, f = _golden_panel(), _formula()
+    out = {name: _eq_records(bt.run(data, f, "2022-06-01", "2023-12-29", cfg=cfg))
+           for name, cfg in _managed_golden_cfgs().items()}
+    FIXTURE_MGD.parent.mkdir(parents=True, exist_ok=True)
+    FIXTURE_MGD.write_text(json.dumps(out))
+    print(f"[capture] wrote managed golden -> {FIXTURE_MGD}")
+
+
+def test_intraweek_off_parity() -> None:
+    """intraweek_entry=False reproduces the original managed path bit-for-bit."""
+    assert FIXTURE_MGD.exists(), f"managed golden missing ({FIXTURE_MGD}) — run --capture-managed"
+    golden = json.loads(FIXTURE_MGD.read_text())
+    data, f = _golden_panel(), _formula()
+    for name, cfg in _managed_golden_cfgs().items():
+        cfg.intraweek_entry = False  # explicit OFF
+        got = _eq_records(bt.run(data, f, "2022-06-01", "2023-12-29", cfg=cfg))
+        g = golden[name]
+        assert got["equity"] == g["equity"], f"[{name}] equity drift — intra-week OFF broke parity"
+        assert got["trades"] == g["trades"], f"[{name}] trades drift — intra-week OFF broke parity"
+        assert got["stats"] == g["stats"], f"[{name}] stats drift — intra-week OFF broke parity"
+    print("[PASS] intra-week OFF — managed path still bit-identical to golden")
+
+
+def _intraweek_panel() -> tuple[dict[str, pd.DataFrame], pd.DatetimeIndex, int]:
+    """A single name 'MID' that drifts gently up on FLAT volume (no event fires —
+    volume never clears the 1.5x bar) until a Tuesday spike. idx[81] is a Tuesday
+    (bdate_range Mon-start, 81 % 5 == 1): close is a fresh high AND volume = 3x ->
+    the breakout event fires on THAT Tuesday only. The next W-FRI anchor is the
+    Friday idx[84]. So OFF enters Friday idx[84]; ON must enter Tuesday idx[81]."""
+    n = 120
+    idx = pd.bdate_range("2023-01-02", periods=n)
+    tue = 81
+    assert idx[tue].weekday() == 1, "idx[81] must be a Tuesday"
+    # 1%/day so each close clears the prior bar's high (_df high = close*1.004):
+    # the `break` condition fires daily; only the volume gate gates the event.
+    close = 100.0 * (1.0 + 0.01) ** np.arange(n)
+    vol = np.full(n, 1.0e6)
+    vol[tue] = 3.0e6                                # the only volume spike
+    data = _make_panel_from_closes({"MID": close}, idx, vols={"MID": vol})
+    return data, idx, tue
+
+
+def _intraweek_cfg() -> bt.BacktestConfig:
+    return bt.BacktestConfig(
+        top_n=2, rebalance="W-FRI", mode="managed",
+        vol_confirm_mult=1.5, event_lookback=3, event_vol_lookback=5, event_window_bars=5,
+        atr_stop_mult=2.0, atr_stop_period=14, trailing_stop_pct=0.0, time_stop_bars=0,
+        benchmark_ticker="SPY")
+
+
+def test_intraweek_on_enters_midweek() -> None:
+    data, idx, tue = _intraweek_panel()
+    f = _formula()
+    start, end = "2023-01-02", str(idx[-1].date())
+    fri = idx[84]
+    assert fri.weekday() == 4, "idx[84] must be the following Friday"
+
+    off = bt.run(data, f, start, end, cfg=_intraweek_cfg())  # intraweek default OFF
+    cfg_on = _intraweek_cfg(); cfg_on.intraweek_entry = True
+    on = bt.run(data, f, start, end, cfg=cfg_on)
+
+    off_mid = off.trades[off.trades.ticker == "MID"]
+    on_mid = on.trades[on.trades.ticker == "MID"]
+    assert not off_mid.empty, "OFF: MID never entered"
+    assert not on_mid.empty, "ON: MID never entered"
+
+    off_enter = pd.Timestamp(off_mid.iloc[0]["enter"])
+    on_enter = pd.Timestamp(on_mid.iloc[0]["enter"])
+    assert off_enter == fri, f"OFF should enter at the Friday anchor {fri.date()}, got {off_enter.date()}"
+    assert on_enter == idx[tue], f"ON should enter on the Tuesday {idx[tue].date()}, got {on_enter.date()}"
+    assert on_enter < off_enter, "intra-week entry must be EARLIER than the weekly anchor"
+    # Slot accounting: MID entered exactly once, book never exceeds top_n.
+    assert len(on_mid) == 1, f"ON: MID entered {len(on_mid)} times — slot/dedup broken"
+    print(f"[PASS] intra-week ON — MID entered Tue {on_enter.date()} vs weekly Fri {off_enter.date()}")
+
+
 def main() -> int:
     test_parity_rebalance_unchanged()
     test_stepper_parity()
@@ -284,9 +380,14 @@ def main() -> int:
     test_loser_cut()
     test_slot_free_and_refill()
     test_no_leak()
+    test_intraweek_off_parity()
+    test_intraweek_on_enters_midweek()
     print("\nALL MANAGED TESTS PASSED")
     return 0
 
 
 if __name__ == "__main__":
+    if "--capture-managed" in sys.argv:
+        capture_managed_golden()
+        raise SystemExit(0)
     raise SystemExit(main())

@@ -124,6 +124,16 @@ class BacktestConfig:
     event_vol_lookback: int = 60         # avg-volume window for the confirmation
     event_window_bars: int = 1           # fired on any of the trailing N bars <= d0
 
+    # Managed-mode ADDITIVE intra-week entry. False (default) = entries fire ONLY
+    # at the weekly W-FRI rebalance anchors -> behavior bit-identical to the
+    # original managed path (parity preserved). True = ALSO scan every daily bar:
+    # when a slot is free and the breakout event fires on THAT day's bar, enter
+    # that day instead of waiting for Friday. Weekly equity sampling and the
+    # weekly re-rank are unchanged; cost is charged per-fill as before. Strict
+    # superset of the weekly behavior — never removes a weekly entry, only adds
+    # earlier ones. Ignored outside managed mode.
+    intraweek_entry: bool = False
+
 
 @dataclass
 class BacktestResult:
@@ -578,6 +588,12 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
             _enter(t)
             equity.append(_mv(t))
             eq_index.append(t)
+        elif cfg.intraweek_entry:
+            # ADDITIVE: scan this mid-week bar too. _enter is a no-op when the
+            # book is full (free <= 0) and only fills slots whose breakout event
+            # fired on/just before t. Equity is NOT sampled here — weekly sampling
+            # (n_per_year=52) and the weekly re-rank above are untouched.
+            _enter(t)
 
     # Mark-to-market close any positions still open at the final bar.
     last = master[-1]

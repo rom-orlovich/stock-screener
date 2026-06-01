@@ -93,6 +93,7 @@ def cmd_backtest(args):
         time_stop_bars=args.time_stop_bars,
         benchmark_ticker=bench,
         mode=args.mode,
+        intraweek_entry=args.intraweek_entry,
     )
     res = bt.run(data, f, start=args.start, end=args.end, cfg=cfg)
 
@@ -161,6 +162,10 @@ def main():
     b.add_argument("--atr-stop-period", type=int, default=None)
     b.add_argument("--time-stop-bars", type=int, default=None,
                    help="exit after N daily bars since entry (0 = disabled)")
+    b.add_argument("--intraweek-entry", action=argparse.BooleanOptionalAction, default=None,
+                   help="managed mode only: ADDITIVE intra-week entries — also enter "
+                        "on any daily bar whose breakout event fires, not just the "
+                        "weekly anchor. Default (off) is bit-identical to weekly-only.")
     b.add_argument("--benchmark", default="SPY",
                    help="buy-and-hold benchmark ticker for alpha calc")
     b.add_argument("--min-liquidity", type=float, default=0.0,
