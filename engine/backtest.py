@@ -510,6 +510,14 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
     lb = int(cfg.event_lookback) or int(f.raw.get("indicators", {}).get("breakout_lookback", 30))
     cost = cfg.cost_bps / 10000.0
 
+    # Absolute-momentum regime gate (opt-in): active ONLY when the YAML declares an
+    # `absolute_momentum` block with a cash_fallback. When risk-off, flatten to cash
+    # at the rebalance anchor and skip new entries until risk-on resumes (cash sits
+    # flat — a conservative stand-in for rotating into the bond proxy). Gated so
+    # managed WITHOUT the block is byte-identical (golden_managed parity).
+    abs_cfg = f.raw.get("absolute_momentum") or {}
+    use_regime = bool(abs_cfg) and bool(abs_cfg.get("cash_fallback"))
+
     # Precompute per-bar event flags once per ticker (bit-identical to
     # _breakout_event_fired). _firers(t) then returns the names whose event fired
     # within the trailing window ending at t via an O(1) array slice — so _enter
@@ -635,20 +643,33 @@ def _run_managed(price_data: dict[str, pd.DataFrame], f: Formula,
             }
             added += 1
 
-    # First anchor: baseline equity 1.0, open the initial book.
+    def _regime_ok(t: pd.Timestamp) -> bool:
+        return True if not use_regime else _market_regime_ok(price_data, abs_cfg, t)
+
+    def _flatten(t: pd.Timestamp, reason: str) -> None:
+        for tkr in list(positions):
+            px = price_data[tkr]["close"].asof(t)
+            if pd.notna(px):
+                _close(tkr, t, float(px), reason)
+
+    # First anchor: baseline equity 1.0, open the initial book (unless risk-off).
     equity.append(1.0)
     eq_index.append(anchors[0])
-    _enter(anchors[0])
+    if _regime_ok(anchors[0]):
+        _enter(anchors[0])
 
     for t in master:
         if t <= anchors[0]:
             continue
         _exits(t)
         if t in anchor_set:
-            _enter(t)
+            if _regime_ok(t):
+                _enter(t)
+            else:
+                _flatten(t, "regime")   # rotate to cash while the market is risk-off
             equity.append(_mv(t))
             eq_index.append(t)
-        elif cfg.intraweek_entry:
+        elif cfg.intraweek_entry and _regime_ok(t):
             # ADDITIVE: scan this mid-week bar too. _enter is a no-op when the
             # book is full (free <= 0) and only fills slots whose breakout event
             # fired on/just before t. Equity is NOT sampled here — weekly sampling
