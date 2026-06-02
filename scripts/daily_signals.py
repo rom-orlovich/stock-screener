@@ -33,7 +33,7 @@ from engine import atr as atr_mod  # noqa: E402
 from engine import backtest as bt  # noqa: E402
 from engine.data import get_universe  # noqa: E402
 from engine.score import Formula, score_ticker  # noqa: E402
-from engine.universe import get_universe_tickers  # noqa: E402
+from engine.universe import get_universe_tickers, liquidity_filter  # noqa: E402
 
 FORMULA_FP = ROOT / "formulas" / "leading_stock_v1.yaml"
 # Robust core: VCP weighting (selection), managed per-position stops handle risk.
@@ -53,7 +53,10 @@ def _vcp_formula() -> Formula:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--universe", default="sp500")
+    ap.add_argument("--universe", default="russell1000",
+                    help="tradeable sweet spot = liquid large/mid-cap (russell1000)")
+    ap.add_argument("--min-liquidity", type=float, default=20_000_000,
+                    help="min avg dollar-volume — only show names you can actually swing-trade")
     ap.add_argument("--end", default=None, help="as-of date (default: latest available)")
     ap.add_argument("--fetch-start", default="2024-06-01")
     ap.add_argument("--top", type=int, default=15)
@@ -70,6 +73,12 @@ def main() -> int:
     end = args.end or pd.Timestamp.today().strftime("%Y-%m-%d")
     print(f"fetching {len(tickers)} tickers {args.fetch_start} -> {end} ...", flush=True)
     data = get_universe(tickers, start=args.fetch_start, end=end, provider="yf")
+    if args.min_liquidity > 0:
+        before = len(data); spy_keep = data.get("SPY")
+        data = liquidity_filter(data, min_avg_dollar_vol=args.min_liquidity)
+        if spy_keep is not None:
+            data["SPY"] = spy_keep
+        print(f"  liquidity >= ${args.min_liquidity:,.0f}: {before} -> {len(data)} tradeable", flush=True)
     spy = data.get("SPY")
     d0 = spy.index[-1] if spy is not None and not spy.empty else pd.Timestamp(end)
     print(f"\n{'='*64}\nDAILY SIGNALS  (as of {pd.Timestamp(d0).date()})  universe={args.universe}\n{'='*64}")
