@@ -39,6 +39,9 @@ from .score import (  # noqa: F401
     _pos_at_daily,
     _pos_at_weekly,
     _timeframe_score_at,
+    _TT_HIGH_WITHIN,
+    _TT_LONG_RISING_LB,
+    _TT_LOW_ABOVE,
     precompute_indicators,
     score_ticker_at,
     timeframe_score,
@@ -105,6 +108,7 @@ def precompute_universe(price_data: Dict[str, pd.DataFrame], f: Formula) -> dict
         "close", "high", "low",
         "rsi", "sma_fast", "sma_slow",
         "momentum", "rolling_high", "rolling_low", "stdev_returns",
+        "tt_ma_s", "tt_ma_m", "tt_ma_l",
     )
     mats: dict[str, np.ndarray] = {k: np.full((N, D), np.nan, dtype=np.float64) for k in keys}
 
@@ -160,6 +164,9 @@ def precompute_universe(price_data: Dict[str, pd.DataFrame], f: Formula) -> dict
         "daily_rolling_high": mats["rolling_high"],
         "daily_rolling_low": mats["rolling_low"],
         "daily_stdev_returns": mats["stdev_returns"],
+        "daily_tt_ma_s": mats["tt_ma_s"],
+        "daily_tt_ma_m": mats["tt_ma_m"],
+        "daily_tt_ma_l": mats["tt_ma_l"],
         "daily_atr_pct": atr_pct,
         "daily_gap": gap,
         "daily_bb_width": bb_width,
@@ -352,6 +359,38 @@ def _daily_score_vectorized(
             np.where(gmax < g_hi, ramp, np.where(gmax < g_fade, fade_v, 0.0)),
         )
 
+    # high52_proximity — George & Hwang nearness to the 52-week high, vectorized
+    # mirror of score._high52_proximity_score (`hi` == breakout_lookback rolling
+    # high == 252 == 52 weeks in leading_stock_v1). Not a quietness term — it
+    # survives the trend gate.
+    high52_s = np.zeros_like(close)
+    if w.get("high52_proximity", 0.0) > 0.0:
+        with np.errstate(divide="ignore", invalid="ignore"):
+            prox = np.where(hi > 0, close / hi, 0.0)
+        high52_s = np.where(np.isfinite(hi) & (hi > 0), np.clip(prox, 0.0, 1.0), 0.0)
+
+    # trend_template — Minervini 8-rule fraction, vectorized mirror of
+    # score._trend_template_score. mom is the raw momentum (RS proxy, rule 8).
+    tt_s = np.zeros_like(close)
+    if w.get("trend_template", 0.0) > 0.0:
+        ma_s_v = universe_pre["daily_tt_ma_s"][mask, d_pos]
+        ma_m_v = universe_pre["daily_tt_ma_m"][mask, d_pos]
+        ma_l_v = universe_pre["daily_tt_ma_l"][mask, d_pos]
+        if d_pos >= _TT_LONG_RISING_LB:
+            ma_l_prev_v = universe_pre["daily_tt_ma_l"][mask, d_pos - _TT_LONG_RISING_LB]
+        else:
+            ma_l_prev_v = np.full_like(ma_l_v, np.nan)
+        r1 = np.isfinite(ma_s_v) & (close > ma_s_v)
+        r2 = np.isfinite(ma_m_v) & (close > ma_m_v)
+        r3 = np.isfinite(ma_l_v) & (close > ma_l_v)
+        r4 = (np.isfinite(ma_s_v) & np.isfinite(ma_m_v) & np.isfinite(ma_l_v)
+              & (ma_s_v > ma_m_v) & (ma_m_v > ma_l_v))
+        r5 = np.isfinite(ma_l_v) & np.isfinite(ma_l_prev_v) & (ma_l_v > ma_l_prev_v)
+        r6 = np.isfinite(lo_n) & (lo_n > 0) & (close >= lo_n * (1.0 + _TT_LOW_ABOVE))
+        r7 = np.isfinite(hi) & (hi > 0) & (close >= hi * (1.0 - _TT_HIGH_WITHIN))
+        r8 = np.isfinite(mom) & (mom > 0.0)
+        tt_s = (r1.astype(np.float64) + r2 + r3 + r4 + r5 + r6 + r7 + r8) / 8.0
+
     # Stage-2 trend gate (opt-in via YAML) — mirror of the per-d0 path: the
     # quietness terms only count when price sits above the slow SMA.
     if cfg.get("trend_gate_quietness", False):
@@ -372,7 +411,9 @@ def _daily_score_vectorized(
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
              + w.get("bb_squeeze", 0.0) * bbsq_s
-             + w.get("gap", 0.0) * gap_s)
+             + w.get("gap", 0.0) * gap_s
+             + w.get("high52_proximity", 0.0) * high52_s
+             + w.get("trend_template", 0.0) * tt_s)
 
     return np.round(total, 4), uptrend
 

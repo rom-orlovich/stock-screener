@@ -39,7 +39,7 @@ Outputs land in `runs/`:
 ## How scoring works
 
 Every formula in `formulas/*.yaml` produces a 0-1 score per ticker per day.
-The score is a weighted sum of up to nine sub-scores, computed across three
+The score is a weighted sum of sub-scores, computed across three
 timeframes (`daily`, `weekly`, `monthly`):
 
 | Sub-score | What it measures |
@@ -49,10 +49,20 @@ timeframes (`daily`, `weekly`, `monthly`):
 | `rsi` | Inside `rsi_band`, decaying outside |
 | `breakout` | Proximity to N-day high (long) or low (`direction: reversion`) |
 | `breakout_thrust` | `close` sitting just above the causal pivot — peaks 1-3% above, fades to 0 by ~5% (don't chase). Rewards the early break itself, not just nearness |
+| `high52_proximity` | `close / 52-week-high`, clipped to [0,1] (1.0 at/above the high). George & Hwang (2004): nearness to the 52-week high predicts cross-sectional returns better than past-return momentum. Gentle nearness — distinct from `breakout`, which applies a 5x penalty below the pivot. Uses the `breakout_lookback` rolling high (keep it at 252 for the 52-week window) |
+| `trend_template` | Minervini SEPA — fraction (0-1) of 8 objective, causal rules passed: px>50/150/200d MA, 50>150>200 stacking, 200d MA rising vs ~1mo ago, ≥30% above the 52wk low, within 25% of the 52wk high, positive 6-month RS (proxy for RS-rank≥70). Used as a continuous ranking score, NOT a hard gate (the engine already gates entries via managed mode + volume-confirmed breakout) |
 | `volatility` | Lowest stdev of daily returns → highest score |
 | `atr_contraction` | ATR-% today vs N sessions ago — vol contraction = squeeze. Gated to `px > sma_slow` when the YAML sets `trend_gate_quietness: true` (Stage-2) |
 | `volume_dryup` | 20d avg vol < 80% of 60d avg vol (also `trend_gate_quietness`-gated) |
 | `bb_squeeze` | Current BB-width in bottom quintile of trailing window (also `trend_gate_quietness`-gated) |
+
+`high52_proximity` and `trend_template` are research-backed signals (out-of-sample
+survivors from a deep-research factor review). Both default to weight 0 via
+`w.get(key, 0.0)`, so only formulas that opt in are affected. The trend-template
+periods (50/150/200/21/252, 30%/25% bands) are FIXED in `engine/score.py` — they
+are the canonical research values, deliberately NOT exposed to the auto-tuner to
+avoid an overfitting surface. Parity across all three scoring paths is asserted by
+`scripts/parity_research_signals.py`.
 
 Sub-scores are mixed by `timeframe_score_weights` per timeframe, then the
 three timeframes are mixed by `timeframe_weights`, then an `alignment_bonus`

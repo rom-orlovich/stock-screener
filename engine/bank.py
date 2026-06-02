@@ -23,7 +23,12 @@ import pandas as pd
 
 from . import atr as atr_mod
 from . import indicators as ind
-from .score import Formula
+from .score import (
+    Formula,
+    _TT_MA_LONG,
+    _TT_MA_MID,
+    _TT_MA_SHORT,
+)
 
 # Default periods mirror precompute_indicators' cfg.get(...) fallbacks exactly.
 _VOL_DEFAULT = 90
@@ -45,6 +50,10 @@ def _specs_for(cfg: dict) -> set[tuple[str, int]]:
         ("momentum", cfg["momentum_lookback"]),
         ("rolling_high", cfg["breakout_lookback"]),
         ("rolling_low", cfg["breakout_lookback"]),
+        # Minervini trend-template fixed-period MAs (dedupe with sma_fast/slow).
+        ("sma", _TT_MA_SHORT),
+        ("sma", _TT_MA_MID),
+        ("sma", _TT_MA_LONG),
         ("stdev_returns", cfg.get("volatility_lookback", _VOL_DEFAULT)),
         ("atr_pct", cfg.get("atr_period", _ATR_DEFAULT)),
         ("bb_width", cfg.get("bb_period", _BB_DEFAULT)),
@@ -157,6 +166,9 @@ def _assemble_tf(tf_bank: dict, cfg: dict) -> dict:
         "rolling_high": s[("rolling_high", cfg["breakout_lookback"])],
         "rolling_low": s[("rolling_low", cfg["breakout_lookback"])],
         "stdev_returns": s[("stdev_returns", cfg.get("volatility_lookback", _VOL_DEFAULT))],
+        "tt_ma_s": s[("sma", _TT_MA_SHORT)],
+        "tt_ma_m": s[("sma", _TT_MA_MID)],
+        "tt_ma_l": s[("sma", _TT_MA_LONG)],
     }
     # Optional keys: present only if the bank computed them (OHLC/volume guards),
     # exactly mirroring _compute, where a failed/guarded indicator leaves the key out.

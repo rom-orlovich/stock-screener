@@ -91,6 +91,75 @@ def _gap_score(gap_pct: float, lo_band: float, hi_band: float, fade: float) -> f
     return 0.0
 
 
+# ---------------------------------------------------------------------------
+# Research-backed ranking signals (deep-research report; out-of-sample survivors).
+#   1. high52_proximity — George & Hwang (2004): nearness to the 52-week high is
+#      a better cross-sectional return predictor than past-return momentum.
+#   2. trend_template    — Minervini SEPA: an objective 8-rule trend screen.
+# Both are gated to leading_stock_v1 via YAML weights (w.get(..., 0.0) == 0 in
+# every other formula -> zero contribution, no renormalization). Mirrored in
+# score_vec.py for cross-section parity.
+#
+# The trend-template periods are the canonical FIXED research values, not YAML
+# tunables — exposing them to the auto-tuner would add an overfitting surface the
+# research explicitly warns against. They are evaluated per-timeframe like every
+# other sub-score; on the daily timeframe this is the canonical Minervini screen,
+# on weekly/monthly it is the same structure at a longer horizon (rules whose MAs
+# lack history simply fail -> a lower fraction, never a crash).
+_TT_MA_SHORT = 50
+_TT_MA_MID = 150
+_TT_MA_LONG = 200
+_TT_LONG_RISING_LB = 21          # 200d MA must be rising vs ~1 trading month ago
+_TT_LOW_ABOVE = 0.30             # rule 6: >= 30% above the 52-week low
+_TT_HIGH_WITHIN = 0.25           # rule 7: within 25% of the 52-week high
+
+
+def _high52_proximity_score(px: float, hi: float) -> float:
+    """George & Hwang nearness to the 52-week high = close / 52wk-high in [0,1].
+
+    `hi` is the causal rolling high (`rolling_high` excludes the current bar;
+    breakout_lookback == 252 in leading_stock_v1 == the 52-week window). A stock
+    sitting at/above its 52-week high scores 1.0; one 20% below scores 0.8. This
+    is the gentle nearness measure — distinct from the `breakout` sub-score,
+    which applies a 5x penalty below the pivot.
+    """
+    if not (pd.notna(hi) and hi > 0):
+        return 0.0
+    return _clip01(px / hi)
+
+
+def _trend_template_score(px: float, ma_s: float, ma_m: float, ma_l: float,
+                          ma_l_prev: float, hi52: float, lo52: float,
+                          mom: float) -> float:
+    """Minervini 8-rule trend template as a continuous score = fraction passed.
+
+    All rules are causal and objective. A continuous fraction (rather than a hard
+    8/8 gate) is used deliberately: the engine already gates entries (managed mode
+    + volume-confirmed breakout), so a second hard gate filtering ~95% of names
+    would starve the book; the fraction lets the ranker weight trend quality
+    instead. Rules (px = latest close):
+      1 px > 50d MA            2 px > 150d MA            3 px > 200d MA
+      4 50d > 150d > 200d (stacking)
+      5 200d MA rising vs ~1 month ago
+      6 px >= 30% above the 52-week low
+      7 px within 25% of the 52-week high
+      8 RS proxy: positive 6-month momentum (per-ticker stand-in for "RS-rank
+        >= 70th pct"; true cross-sectional RS is enforced by the engine ranking
+        names by total score and taking top_n).
+    """
+    rules = (
+        pd.notna(ma_s) and px > ma_s,
+        pd.notna(ma_m) and px > ma_m,
+        pd.notna(ma_l) and px > ma_l,
+        pd.notna(ma_s) and pd.notna(ma_m) and pd.notna(ma_l) and ma_s > ma_m > ma_l,
+        pd.notna(ma_l) and pd.notna(ma_l_prev) and ma_l > ma_l_prev,
+        pd.notna(lo52) and lo52 > 0 and px >= lo52 * (1.0 + _TT_LOW_ABOVE),
+        pd.notna(hi52) and hi52 > 0 and px >= hi52 * (1.0 - _TT_HIGH_WITHIN),
+        pd.notna(mom) and mom > 0.0,
+    )
+    return sum(1 for r in rules if r) / 8.0
+
+
 def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
     """Score a single timeframe's OHLCV. Returns sub-scores + trend flag.
 
@@ -269,6 +338,26 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
         if not recent.empty:
             gap_s = _gap_score(float(recent.max()), g_lo, g_hi, g_fade)
 
+    # Research signals (computed only when weighted — zero otherwise, so absent
+    # weights stay bit-identical and other formulas pay no cost). `hi`/`lo_n` are
+    # the breakout_lookback rolling extremes (=252 = the 52-week window in
+    # leading_stock_v1); `mom` is the raw momentum used as the RS proxy.
+    wraw = f.raw["timeframe_score_weights"]
+    high52_s = 0.0
+    if wraw.get("high52_proximity", 0.0):
+        high52_s = _high52_proximity_score(px, hi)
+    tt_s = 0.0
+    if wraw.get("trend_template", 0.0):
+        ma_s_ser = ind.sma(close, _TT_MA_SHORT)
+        ma_m_ser = ind.sma(close, _TT_MA_MID)
+        ma_l_ser = ind.sma(close, _TT_MA_LONG)
+        ma_s = ma_s_ser.iloc[-1]
+        ma_m = ma_m_ser.iloc[-1]
+        ma_l = ma_l_ser.iloc[-1]
+        ma_l_prev = (ma_l_ser.iloc[-1 - _TT_LONG_RISING_LB]
+                     if len(ma_l_ser) > _TT_LONG_RISING_LB else float("nan"))
+        tt_s = _trend_template_score(px, ma_s, ma_m, ma_l, ma_l_prev, hi, lo_n, mom)
+
     # Stage-2 trend gate (opt-in via YAML): the quietness terms only count when
     # price sits above the slow SMA, dropping "quiet downtrend / topping" false
     # positives. Causal — `ss` uses only data up to the current bar.
@@ -285,7 +374,9 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
              + w.get("bb_squeeze", 0.0) * bbsq_s
-             + w.get("gap", 0.0) * gap_s)
+             + w.get("gap", 0.0) * gap_s
+             + w.get("high52_proximity", 0.0) * high52_s
+             + w.get("trend_template", 0.0) * tt_s)
     return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
             "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
             "breakout_thrust": round(thrust_s, 4),
@@ -294,6 +385,8 @@ def timeframe_score(df: pd.DataFrame, f: Formula) -> dict:
             "volume_dryup": round(vdry_s, 4),
             "bb_squeeze": round(bbsq_s, 4),
             "gap": round(gap_s, 4),
+            "high52_proximity": round(high52_s, 4),
+            "trend_template": round(tt_s, 4),
             "total": round(total, 4), "uptrend": bool(uptrend)}
 
 
@@ -380,6 +473,11 @@ def precompute_indicators(daily: pd.DataFrame, f: Formula) -> dict:
             "rolling_high": ind.rolling_high(high, cfg["breakout_lookback"]),
             "rolling_low": ind.rolling_low(low, cfg["breakout_lookback"]),
             "stdev_returns": ind.stdev_returns(close, cfg.get("volatility_lookback", 90)),
+            # Minervini trend-template fixed-period MAs (only used when the YAML
+            # weights `trend_template`; always present for a stable precompute shape).
+            "tt_ma_s": ind.sma(close, _TT_MA_SHORT),
+            "tt_ma_m": ind.sma(close, _TT_MA_MID),
+            "tt_ma_l": ind.sma(close, _TT_MA_LONG),
         }
         if {"open", "high", "low", "close"}.issubset(df.columns):
             # Per-bar up-gap (open vs prior close); _timeframe_score_at takes a
@@ -498,6 +596,7 @@ _EMPTY_TF = {
     "breakout": 0.0, "breakout_thrust": 0.0, "volatility": 0.0,
     "atr_contraction": 0.0, "volume_dryup": 0.0,
     "bb_squeeze": 0.0, "gap": 0.0,
+    "high52_proximity": 0.0, "trend_template": 0.0,
     "total": 0.0, "uptrend": False,
 }
 
@@ -666,6 +765,25 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
         if not recent.empty:
             gap_s = _gap_score(float(recent.max()), g_lo, g_hi, g_fade)
 
+    # Research signals — mirror of the per-d0 path, reading precomputed series at
+    # `pos`. Causal: sma(full)[pos] == sma(slice[:pos+1])[-1]; rolling_high too.
+    wraw = f.raw["timeframe_score_weights"]
+    high52_s = 0.0
+    if wraw.get("high52_proximity", 0.0):
+        high52_s = _high52_proximity_score(px, hi)
+    tt_s = 0.0
+    if wraw.get("trend_template", 0.0):
+        ma_s_ser = pre.get("tt_ma_s")
+        ma_m_ser = pre.get("tt_ma_m")
+        ma_l_ser = pre.get("tt_ma_l")
+        if ma_s_ser is not None and ma_m_ser is not None and ma_l_ser is not None:
+            ma_s = ma_s_ser.iloc[pos]
+            ma_m = ma_m_ser.iloc[pos]
+            ma_l = ma_l_ser.iloc[pos]
+            ma_l_prev = (ma_l_ser.iloc[pos - _TT_LONG_RISING_LB]
+                         if pos >= _TT_LONG_RISING_LB else float("nan"))
+            tt_s = _trend_template_score(px, ma_s, ma_m, ma_l, ma_l_prev, hi, lo_n, mom)
+
     # Stage-2 trend gate (opt-in via YAML) — mirror of the per-d0 path.
     if cfg.get("trend_gate_quietness", False) and not (pd.notna(ss) and px > ss):
         atr_s = vdry_s = bbsq_s = 0.0
@@ -680,7 +798,9 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
              + w.get("atr_contraction", 0.0) * atr_s
              + w.get("volume_dryup", 0.0) * vdry_s
              + w.get("bb_squeeze", 0.0) * bbsq_s
-             + w.get("gap", 0.0) * gap_s)
+             + w.get("gap", 0.0) * gap_s
+             + w.get("high52_proximity", 0.0) * high52_s
+             + w.get("trend_template", 0.0) * tt_s)
     return {"momentum": round(mom_s, 4), "trend": round(trend_s, 4),
             "rsi": round(rsi_s, 4), "breakout": round(brk_s, 4),
             "breakout_thrust": round(thrust_s, 4),
@@ -689,6 +809,8 @@ def _timeframe_score_at(pre: dict, pos: int, f: Formula) -> dict:
             "volume_dryup": round(vdry_s, 4),
             "bb_squeeze": round(bbsq_s, 4),
             "gap": round(gap_s, 4),
+            "high52_proximity": round(high52_s, 4),
+            "trend_template": round(tt_s, 4),
             "total": round(total, 4), "uptrend": bool(uptrend)}
 
 
