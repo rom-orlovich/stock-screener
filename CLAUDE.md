@@ -77,6 +77,29 @@ auto_tune.py ──► walk-forward 3-fold ──► accepts/rejects
 
 ## Recent changes (history matters)
 
+- **2026-06-02** — feat: **two research-backed ranking signals** (deep-research
+  factor review, out-of-sample survivors) in `engine/score.py`, mirrored in
+  `score_vec.py` + `bank.py`. (1) **`high52_proximity`** = George & Hwang (2004)
+  `clip01(close/rolling_high(252))` — gentle 52wk-high nearness (distinct from
+  `breakout`'s 5× sub-pivot penalty). (2) **`trend_template`** = Minervini 8-rule
+  objective screen as a *continuous fraction* (NOT a hard gate — managed mode
+  already gates entries); periods FIXED in code (50/150/200/21/252, 30%/25%), not
+  auto-tuner params (anti-overfit). Both opt-in via `w.get(key,0.0)` → other
+  formulas untouched; zero-weight path **bit-identical** to old code
+  (`scripts/parity_research_signals.py`: shape + 215-row golden + tri-path). RS-rank
+  (rule 8) uses a per-ticker positive-momentum proxy (true cross-sectional RS is
+  enforced by the engine's rank→top_n). **A/B (single-process, sp500, vs nightly
+  tuner):** isolating each signal, **high52 is positive-or-neutral in every window**
+  — decisive on the tuner window full_2023 (**+18% ret, alpha −0.27→−0.13, sharpe
+  1.14→1.29, DD −0.188→−0.163**) and the AI bull (**+24%**), defensive in the 2022
+  bear. **trend_template alone is also strong** (full_2018 +11.9%, full_2023 +16%)
+  but **redundant with high52**: combined at equal weight they interfere
+  destructively (`both` full_2023 = 0.721 < baseline 0.768). So **SHIPPED high52
+  only** (`leading_stock_v1.yaml` weight 0.20 → 0.167 norm, bounds [0.05,0.30]);
+  `trend_template` kept at weight 0 (opt-in alternative, never alongside high52).
+  Wired: `scripts/ab_research_signals.py`. See `research_RESULT.md`. **On merge,
+  clear `leading_stock_v1` `monthly_baseline` in `runs/auto_tune_state.json`
+  (CLAUDE.md #3).** Branch `feat/research-signals`; not merged.
 - **2026-06-01** — feat: **additive intra-week entry** in managed mode
   (`BacktestConfig.intraweek_entry: bool = False`). OFF (default) keeps managed
   entries on the weekly W-FRI anchors only → **bit-identical** to the original

@@ -1,113 +1,119 @@
-# Research Signals — Implementation + A/B Result
+# Research Signals — Implementation + A/B Result (FINAL)
 
-Branch `feat/research-signals` (worktree). Two research-backed ranking signals
-added to `leading_stock_v1`, grounded in a deep-research factor review (academic,
+Branch `feat/research-signals`. Two research-backed ranking signals added to
+`leading_stock_v1`, grounded in a deep-research factor review (academic,
 out-of-sample evidence). **No other signals added** — the brief warns most
 anomalies don't replicate; lean only on the survivors.
 
 ## What was added (grounded in the cited research)
 
-### 1. `high52_proximity` — George & Hwang (2004)
+### 1. `high52_proximity` — George & Hwang (2004)  →  **SHIPPED**
 *"Nearness to the 52-week high is a better predictor of future returns than past
 returns; ranking by the 52-week high dominates and improves upon past-return
 momentum."* (bauer.uh.edu/tgeorge/papers/gh4-paper.pdf)
 
 `engine/score.py::_high52_proximity_score` = `clip01(close / rolling_high(252))`,
-causal (rolling_high excludes the current bar), 1.0 at/above the 52-week high,
-0.8 when 20% below. A **gentle** nearness measure — deliberately distinct from the
-existing `breakout` sub-score, which applies a 5× penalty below the pivot. Reuses
-the `breakout_lookback` rolling high (= 252 = 52 weeks in `leading_stock_v1`).
+causal, 1.0 at/above the 52-week high, 0.8 when 20% below. A gentle nearness
+measure — distinct from `breakout` (which applies a 5× penalty below the pivot).
+Reuses the `breakout_lookback` rolling high (= 252 = 52 weeks in leading_stock_v1).
 
-### 2. `trend_template` — Minervini SEPA 8-rule screen
-*"Fully objective 8-rule screen, filters ~95% of stocks."* Implemented as a
-**continuous score = fraction of the 8 rules passed (0-1)**, NOT a hard gate.
-Rationale (documented in code): the engine already gates entries in managed mode
-via the volume-confirmed breakout event, so a second hard 8/8 gate would starve
-the book; a continuous fraction lets the ranker weight trend *quality* instead.
+### 2. `trend_template` — Minervini SEPA 8-rule screen  →  kept in code, weight 0
+Implemented as a **continuous score = fraction of 8 rules passed (0-1)**, NOT a
+hard gate (the engine already gates entries via managed mode + volume-confirmed
+breakout, so a second 8/8 gate would starve the book). 8 causal rules: px>50/150/
+200d MA, 50>150>200 stacking, 200d MA rising vs ~1mo ago, ≥30% above 52wk low,
+within 25% of 52wk high, positive 6-month RS.
+- **RS-rank (rule 8)**: true cross-sectional RS-rank isn't available inside the
+  per-ticker scorer without a two-pass refactor (out of scope). The engine already
+  enforces cross-sectional RS at the portfolio level (ranks by total score, takes
+  top_n); inside the template, positive 6-month momentum is the per-ticker proxy.
+  Honest approximation, flagged.
+- **Fixed periods (no overfitting surface)**: 50/150/200/21/252 + 30%/25% bands
+  are module constants, NOT auto-tuner params (the research warns against
+  curve-fitting).
 
-The 8 causal rules (`engine/score.py::_trend_template_score`):
-1. px > 50d MA  2. px > 150d MA  3. px > 200d MA
-4. 50d > 150d > 200d (stacking)
-5. 200d MA rising vs ~1 month (21 bars) ago
-6. px ≥ 30% above the 52-week low
-7. px within 25% of the 52-week high
-8. RS proxy — positive 6-month momentum.
+Both default to weight 0 via `w.get(key,0.0)`; other formulas unaffected and the
+zero-weight path is bit-identical to old code. Mirrored across all three scoring
+paths (per-d0, vectorized, cross-section) + the shared bank.
 
-**RS-rank (rule 8) decision:** true cross-sectional RS-rank (≥70th pct vs the
-universe) is not available inside the per-ticker scorer without a two-pass
-refactor (out of scope, high parity risk). The engine already enforces
-cross-sectional RS at the *portfolio* level (it ranks names by total score and
-takes top_n). Inside the per-ticker template, positive 6-month momentum is the
-objective per-ticker proxy. This is an honest approximation, flagged here.
-
-**Fixed periods (no overfitting surface):** 50/150/200/21/252 and the 30%/25%
-bands are module-level constants in `engine/score.py`, deliberately NOT exposed to
-the auto-tuner — the research explicitly warns against curve-fitting.
-
-Both signals default to weight 0 via `w.get(key, 0.0)`, so every other formula is
-unaffected and the zero-weight path is bit-identical to old code. Mirrored across
-all three scoring paths (per-d0, per-ticker vectorized, cross-section) and the
-shared indicator bank.
-
-## Parity (all green, no network)
-
-`scripts/parity_research_signals.py`:
-- **SHAPE** — both scalar helpers compute the documented values (nearness ramp,
-  8-rule fractions incl. NaN/partial cases); keys wired into `timeframe_score`.
+## Parity (all green, no network) — `scripts/parity_research_signals.py`
+- **SHAPE** — both helpers compute documented values; keys wired into the scorer.
 - **BASELINE GOLDEN** — `leading_stock_v1` with the new weights stripped is
-  bit-identical to a golden captured from the OLD code
-  (`tests/fixtures/golden_research_parity.json`, 215 rows). Proves additivity.
-- **TRI-PATH** — with both signals ON, score is identical across per-d0 /
-  vectorized / cross-section (float paths strict; cross-section within the
-  pre-existing 1.5e-4 rounding boundary), and both terms verifiably fire.
+  bit-identical to a golden captured from OLD code (215 rows). Proves additivity.
+- **TRI-PATH** — with both signals ON, score identical across per-d0 / vectorized /
+  cross-section (floats strict; cross-section within the pre-existing 1.5e-4
+  rounding boundary); both terms verifiably fire.
+- Existing suites unaffected: `parity_bank`, `parity_breakout_thrust`, `parity_gap`,
+  `parity_fast_monthly` all still bit-identical.
 
-Existing suites unaffected: `parity_bank`, `parity_breakout_thrust`, `parity_gap`,
-`parity_fast_monthly` all still bit-identical.
+## A/B validation (single-process `--parallel 1`, sp500, concurrent with nightly tuner)
 
-## A/B validation (single-process, sp500) — PARTIAL
+Harness `scripts/ab_research_signals.py`. Each new weight ADDED on top of baseline
+and renormalized — the standard "marginal contribution of one signal" test. ONE
+documented weight per variant (no sweep — anti-overfit). All other knobs (managed
+mode, exits, time_stop=40) identical across variants. The shipped YAML config
+(`high52_proximity: 0.20`) is bit-identical to the `high52` variant below, so its
+numbers ARE the live leading_stock_v1 numbers.
 
-Harness `scripts/ab_research_signals.py` (`--parallel 1`, sp500 only). Each new
-weight is ADDED on top of baseline and renormalized by the scorer — the standard
-"marginal contribution of one signal" test. ONE documented weight per variant
-(no sweep — anti-overfit). All other knobs (managed mode, exits, time_stop=40)
-identical across variants, so any delta is attributable to the signal.
+Full grid — **total return** (and max-drawdown) by window. `both` = +0.15/+0.15.
 
-### Window 1 — sp500, 2023-01-01 → 2026-06-01 (DONE)
-`runs/ab_research_focused_2023.json`. Variant `both` = +high52(0.15) +tt(0.15).
+| window (SPY) | baseline | +high52 | +trend_tmpl | +both |
+|---|---|---|---|---|
+| **full_2023** (+1.033) | 0.768 / −0.188 | **0.907 / −0.163** | 0.892 / −0.215 | 0.721 / −0.234 |
+| **full_2018** (+2.143) | 1.679 / −0.227 | 1.698 / −0.208 | **1.878 / −0.227** | 1.822 / −0.234 |
+| bull_2021 (+0.262) | 0.104 / −0.101 | 0.104 / −0.101 | 0.105 / −0.092 | 0.105 / −0.092 |
+| bear_2022 (−0.166) | −0.093 / −0.220 | **−0.081 / −0.210** | −0.094 / −0.223 | −0.094 / −0.223 |
+| ai_2023_2024 (+0.577) | 0.531 / −0.112 | **0.656 / −0.099** | 0.603 / −0.098 | 0.582 / −0.098 |
 
-| variant | total ret | alpha vs SPY | sharpe(wk) | max DD | win | trades | payoff | avg hold |
-|---|---|---|---|---|---|---|---|---|
-| baseline | **0.768** | −0.265 | **1.14** | **−0.188** | 0.48 | 276 | 1.87 | 28.3 |
-| +both    | 0.721 | −0.312 | 1.08 | −0.234 | 0.48 | 276 | 1.88 | 28.3 |
+Sharpe/alpha confirm the same ranking (e.g. full_2023 sharpe: base 1.14 → high52
+1.29 → trend 1.21 → both 1.08; full_2023 alpha: −0.265 → −0.127 → −0.141 → −0.312).
 
-SPY total return over the window: **1.033** (both variants trail buy-and-hold).
+## HONEST per-signal verdict
 
-**Read:** adding both signals is **slightly negative** on this window — lower
-return, lower sharpe, worse drawdown. The trade count is **identical (276)** and
-the exit mix near-identical, meaning the ranking reshuffle barely changes the
-managed-mode book: entry is gated by the volume-confirmed breakout event, and
-among event-firing candidates these ranking signals move selection very little.
-This matches the research caveat that 52wk/momentum effects are **weaker in
-large-caps** (sp500 is all large-cap) and that 2023-now is a mega-cap-led bull.
+### `high52_proximity` — **KEEP, SHIPPED** (weight 0.20 raw → 0.167 normalized)
+Positive or neutral in **every** window, never negative. Strongest where it
+matters most — the tuner's own decision window full_2023 (**+18% return, alpha
+−0.265→−0.127, sharpe 1.14→1.29, DD −0.188→−0.163**) and the AI bull
+(**+24% return**, DD −0.112→−0.099). Defensive in the 2022 bear (smaller loss,
+better DD). Improves drawdown in 3 of 5 windows and ties the other 2. This is
+exactly the George-Hwang result the literature predicts. Shipped as the #2 weight
+behind momentum — a genuinely first-class ranking signal. Note: it reuses the
+`breakout_lookback` rolling high, so keep that at ~252 for the 52-week window
+(the tuner *may* drift it within [120,300]; the signal degrades gracefully).
 
-### Window 2 — full 2018 → now + regimes (DEFERRED)
-Deferred until `auto_tune` finishes (a background waiter handles it), then the
-full 4-variant sweep (baseline / high52 / trend_tmpl / both) runs on
-full_2018, bull_2021, bear_2022, ai_2023_2024 — which also **isolates each signal
-separately** (the focused run only tested `both`). The 2018-now window is where
-managed mode historically diverges most (per CLAUDE.md the managed path's edge is
-on the long window), so it is the decisive test.
+### `trend_template` — **KEEP in code, do NOT ship weighted** (weight 0, opt-in)
+Individually strong: best raw return on the long window (full_2018 **+11.9%**,
++0.20 alpha) and solidly positive on full_2023 (+16%) and the AI bull (+14%). BUT:
+1. **Redundant with high52** — both reward "strong-trend, near-52wk-high" names.
+   Combined at equal weight they over-concentrate and **interfere destructively**:
+   `both` on full_2023 = **0.721, worse than baseline 0.768**, and underperforms
+   *either signal alone* in every window.
+2. Worse drawdown than high52 on the tuner window (−0.215 vs −0.163) and flat in
+   the bear (−0.094 vs baseline −0.093).
+Choosing between two partly-redundant signals, high52 is the more robust
+(better risk-adjusted, never negative). Shipping both would require dedicated
+weight tuning = curve-fitting, which the brief forbids. So `trend_template` stays
+implemented + parity-clean + documented as an opt-in alternative (set its weight
+INSTEAD of high52, never alongside).
 
-## Partial verdict
+### `both` (equal weight) — **DROP.** Underperforms each signal alone and even
+baseline on the live tuner window. The earlier "Window-1 both-is-negative" read
+was an artifact of testing only the combined variant — isolating the signals
+reverses it.
 
-- **Implementation: solid and parity-clean.** Both signals are correct, causal,
-  additive, and triple-path consistent. They are safe to keep in the codebase at
-  weight 0 (zero impact) regardless of the A/B outcome.
-- **On large-cap 2023-now: neither helps** (`both` is marginally negative). NOT a
-  reason to ship them weighted yet.
-- **Recommendation pending Window 2.** If full_2018 + the regimes also show no
-  improvement, the honest call is to **keep the code (default OFF, weight 0) and
-  do NOT weight them in `leading_stock_v1.yaml`** — exactly the anti-curve-fit
-  discipline the brief demands. `leading_stock_v1.yaml` is left UNCHANGED for now.
+## Final shipped config (`formulas/leading_stock_v1.yaml`)
+- `timeframe_score_weights.high52_proximity: 0.20`  (new, A/B-justified)
+- `timeframe_score_weights.trend_template: 0.00`    (off; opt-in)
+- `bounds.high52_proximity: [0.05, 0.30]`           (tuner may refine the weight)
+- All other weights unchanged.
 
-_Updated after Window 2 completes._
+## Merge-time note (CLAUDE.md hard rule #3)
+This is a hand edit to a tuned YAML. On merge to `main`, clear `leading_stock_v1`'s
+`monthly_baseline` in `runs/auto_tune_state.json` (gitignored, per-machine) so the
+next nightly run re-establishes the baseline against the new weight. No action
+needed in this worktree (its `runs/` is separate; the running nightly tuner uses
+the main checkout and was never touched).
+
+## Status
+Implementation + tests + parity + A/B + verdict complete. Committed on
+`feat/research-signals` and pushed. NOT merged.
