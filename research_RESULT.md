@@ -173,3 +173,51 @@ guarantee.
 high52 signal: implementation + tests + parity + A/B + verdict complete and shipped.
 Regime-gate engine feature + daily tool + honest robustness findings committed on
 `feat/research-signals` and pushed. NOT merged.
+
+## Reliability validation — walk-forward consistency + bootstrap (DECISIVE)
+
+`scripts/validate_robustness.py` on the practical config (liquid russell1000, $20M/day,
+985 names). Two tests; the combination is the honest answer to "how much can we trust it".
+
+### 1. Out-of-sample consistency — alpha by non-overlapping 2-year sub-period
+| period | leading_high52 | vcp_ride |
+|---|---|---|
+| 2016-2017 | +0.18 | +0.05 |
+| 2018-2019 | +0.13 | -0.03 |
+| 2020-2021 | +0.47 | +0.56 |
+| 2022-2023 | **-0.23** | **-0.12** |
+| 2024-2026 | **-0.21** | **-0.33** |
+
+**BOTH strategies: positive alpha 2016-2021, NEGATIVE in 2022-2026.** This is ALPHA
+DECAY — not strategy-specific, the factor edge itself has weakened in recent years.
+
+### 2. Bootstrap (5000 resamples, full 10y)
+| | leading_high52 | vcp_ride |
+|---|---|---|
+| expectancy/trade | 2.77% (t=5.55) | 4.03% (t=4.01) |
+| P(expectancy>0) | 100% | 100% |
+| CAGR median | 18.8% | 14.7% |
+| P(beat SPY) | 68% | 42% |
+| maxDD worst-5% | -39% | -42% |
+
+### Decisive verdict — DO NOT trust for live money now
+The bootstrap shows the HISTORICAL trade-edge is statistically significant (t=5.5)
+— but the sub-period split reveals it is BACKWARD-LOADED (2016-2021) and has decayed
+to negative in the last 4 years. P(beat SPY) is only 68%/42% even on the survivorship-
+INFLATED data, and tail drawdowns reach -40%. The period you would trade into (2022+)
+shows no edge.
+
+Honest nuance: the decay is partly REGIME — 2022-2026 favored mega-cap buy-and-hold
+(where momentum/breakout are weakest, as the sp500 tests showed). The edge may be
+regime-dependent rather than permanently dead, but the current regime is unfavorable.
+
+The validation did its job: the headline "CAGR 19%, t=5.5 significant" looked
+deployable; the decomposition showed the edge is gone recently. That is the value of
+measuring reliability — it prevents shipping a decaying strategy with real capital.
+
+### What this changes for the daily tool
+`daily_signals.py` remains a useful research/decision-support scanner (VCP setups +
+ATR stops on a liquid universe), but its candidates carry NO demonstrated recent edge.
+Use it to study setups, not as a profit system. Real-money confidence still needs:
+point-in-time data (survivorship), an edge that is stable in RECENT data, slippage
+modeling, and forward paper-trading.
