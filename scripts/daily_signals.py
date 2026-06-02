@@ -141,9 +141,9 @@ def main() -> int:
             print(f"  {tkr:8s} entry={entry:.2f} now={px:.2f} ({ret*100:+.1f}%) "
                   f"stop~{stop:.2f}  -> {sig}")
 
-    print(f"\n{'-'*64}\nLIMITS: sp500 is survivorship-biased (today's members) -> backtested\n"
-          "edge is optimistic. No live fills/slippage modeled. This is decision\n"
-          "support, NOT financial advice or a profit guarantee. Verify before acting.")
+    print(f"\n{'-'*64}\nLIMITS: the {args.universe} list is today's members (survivorship-biased)\n"
+          "-> backtested edge is optimistic. No live fills/slippage modeled. This is\n"
+          "decision support, NOT financial advice or a profit guarantee. Verify first.")
     return 0
 
 
