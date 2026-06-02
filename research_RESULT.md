@@ -114,6 +114,62 @@ next nightly run re-establishes the baseline against the new weight. No action
 needed in this worktree (its `runs/` is separate; the running nightly tuner uses
 the main checkout and was never touched).
 
+## Follow-on exploration — toward a reliable daily system (HONEST)
+
+After shipping high52, we chased "can a detect→enter→manage→exit system beat SPY,
+reliably?" through a chain of single-process sp500 experiments. The arc and the
+honest conclusions:
+
+1. **Why leading_stock loses to SPY** (`diag_unleashed`): NOT a bug. Managed mode is
+   under-invested (risk-1% sizing caps positions, idle cash) + early `time_stop=40`
+   cuts winners. Benchmark is clean (SPY price B&H). Going fully-invested + no
+   time-stop ("ride") improves risk-adjusted return in bulls but worsens it over a
+   full cycle (holds through crashes). No free lunch.
+
+2. **Full technical VCP setup** (`diag_vcp_ride`): up-weight the contraction coil
+   (atr_contraction/volume_dryup/bb_squeeze) + leadership (momentum/high52) +
+   confirmed break, then RIDE. This is the FIRST config to beat SPY on a window —
+   full_2023 **alpha +0.158, sharpe 1.54, payoff 4.19** (winners 4× losers). But it
+   still loses over the full 2018 cycle (bears).
+
+3. **+ regime cash-rotation** (engine feature `_run_managed` absolute_momentum gate,
+   committed `3d6c4d9`, golden-parity verified): beats SPY on BOTH long windows
+   (full_2018 alpha −0.99→**+0.86**, sharpe 0.63→1.09). Looked like the breakthrough.
+
+4. **Regime robustness sweep** (`diag_regime_sweep`) — the decisive anti-overfit
+   test. Swept the regime lookback (12mo/6mo/3mo) × 4 windows. Result is
+   **NON-MONOTONIC**: 3mo is best on the long windows (alpha +0.95/+1.03) but worst
+   in the isolated bear_2022 (sharpe **−1.75**); 6mo fixes the bear but is *worse
+   than no regime* on the long windows. **No single lookback wins everywhere → the
+   regime overlay is FRAGILE / parameter-lucky, not a stable edge.** The headline
+   "+300% beats SPY" is not trustworthy.
+
+### Honest verdict on the daily-system question
+- **Robust:** VCP stock-selection + per-position ATR stops/trailing (risk managed at
+  the POSITION level, not by market timing). This beats SPY in the 2023 bull on its
+  own merits with strong asymmetry — no timing needed.
+- **Fragile:** market-timing / regime rotation. Keep the code (opt-in, default OFF);
+  do not rely on it.
+- **Inflated:** all absolute returns — sp500 is survivorship-biased (today's members,
+  `engine/universe.py:52` pulls the current Wikipedia list). Trust relative deltas.
+
+### Deliverable: `scripts/daily_signals.py`
+A daily decision-support tool on the robust core. Prints, as of the latest bar:
+market context (SPY vs SHY 6mo — flagged as context only), VCP-ranked BUY candidates
+whose volume-confirmed breakout just fired (score + close + ATR stop + risk%), and
+manage/exit signals for a held book (`--holdings`). Prints its own limits every run.
+This is what Claude can run daily — decision support, NOT an auto-trader or a profit
+guarantee.
+
+### What real-money confidence would still require (not done here)
+- **Point-in-time index membership** (kills survivorship bias) — needs CRSP-grade data.
+- **Walk-forward / out-of-sample** validation, not overlapping windows.
+- **Paper trading** with realistic fills/slippage before any capital.
+- The honest ceiling: a **risk-adjusted** edge (better sharpe/DD), not sustained
+  market-beating returns — and certainly not the 8–10%/month that compounding math
+  rules out at controlled risk.
+
 ## Status
-Implementation + tests + parity + A/B + verdict complete. Committed on
+high52 signal: implementation + tests + parity + A/B + verdict complete and shipped.
+Regime-gate engine feature + daily tool + honest robustness findings committed on
 `feat/research-signals` and pushed. NOT merged.
